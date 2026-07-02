@@ -78,17 +78,21 @@ struct PodDetailsView: View {
         }
     }
 
-    /// Returns the string for the number of hours pod was active
+    /// Returns the string for the number of hours pod was active to two decimals. This value is always
+    /// based on the pod's internal clock whether it is from a faulted, deactivated or currently active pod.
     var podHoursText: String {
         let podTime: TimeInterval
 
-        // If pod faulted, use the faultTime instead of podTime
-        if let fault = podDetails.fault, let faultTime = fault.faultEventTimeSinceActivation {
+        if let faultTime = podDetails.fault?.faultEventTimeSinceActivation {
+            /// Since the pod has a valid faultEventTimeSinceActivation, use this rather than the pod's time.
+            /// Reset type pod faults return atypical fault time values that will not be considered valid on decode.
             podTime = faultTime
         } else {
+            /// Otherwise use the always increasing podTime to compute the pod
+            /// hours for reset pod faults, deactivated pods, or currently active pods.
             podTime = podDetails.podTime
         }
-        return String(format: "%.02f", podTime.hours)
+        return podTime.hours.twoDecimals
     }
 
     var lastStatusText: String {
