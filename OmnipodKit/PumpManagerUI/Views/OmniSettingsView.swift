@@ -21,6 +21,8 @@ struct OmniSettingsView: View  {
 
     var handleRileyLinkSelection: (RileyLinkDevice) -> Void // Eros only
 
+    @State private var o5CertLoaded = false
+
     @State private var showingDeleteConfirmation = false
 
     @State private var showSuspendOptions = false
@@ -323,6 +325,17 @@ struct OmniSettingsView: View  {
                         Button(action: {
                             if self.viewModel.podType == unknownOmnipodType {
                                 self.viewModel.navigateTo?(.selectPodType)
+                            } else if self.viewModel.podType.isO5 &&
+                                !O5CertificateStore.contains(self.viewModel.controllerId)
+                            {
+                                if O5CertificateStore.isEmpty {
+                                    // No longer have any O5 Certificates,
+                                    // navigate to O5 Setup to download one.
+                                    self.viewModel.navigateTo?(.o5KeySetup)
+                                } else {
+                                    // Simply refresh to pick up another certificate
+                                    self.viewModel.refreshO5IdsFromCertStore()
+                                }
                             } else {
                                 self.viewModel.navigateTo?(.pairAndPrime)
                             }
@@ -613,6 +626,23 @@ struct OmniSettingsView: View  {
                 }
             }
 
+            Section() {
+                NavigationLink(destination: Omnipod5SupportView(
+                    podType: viewModel.podType,
+                    controllerId: viewModel.controllerId,
+                    hasActivePod: !viewModel.noPod,
+                    refreshO5IdsFromCertStore: viewModel.refreshO5IdsFromCertStore,
+                    onCertStoreChanged: { o5CertLoaded = !O5RegistrationData.isEmpty }))
+                {
+                    HStack(spacing: 12) {
+                        Image(systemName: o5CertLoaded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(o5CertLoaded ? .green : guidanceColors.warning)
+                        FrameworkLocalText("Omnipod 5 Support", comment: "Text for Omnipod 5 Support navigation link in OmniSettingsView")
+                            .foregroundColor(Color.primary)
+                    }
+                }
+            }
+
 
             if self.viewModel.lifeState.allowsPumpManagerRemoval {
                 Section() {
@@ -636,6 +666,12 @@ struct OmniSettingsView: View  {
         .insetGroupedListStyle()
         .navigationBarItems(trailing: doneButton)
         .navigationBarTitle(self.viewModel.viewTitle)
+        .task {
+            // Ensure both built-in (dlsym) and Keychain-persisted certs are restored
+            // before reading the registry, then seed the status badge.
+            _ = O5CertificateStore.isEmpty
+            o5CertLoaded = !O5RegistrationData.isEmpty
+        }
     }
 
     var syncPumpTimeActionSheet: ActionSheet {
