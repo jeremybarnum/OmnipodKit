@@ -59,9 +59,11 @@ struct DetailedStatus: PodInfo, Equatable {
             self.deliveryStatus = DeliveryStatus(rawValue: encodedData[2] & 0xf)!
         }
 
-        let minutesSinceActivation = encodedData[9...10].toBigEndian(UInt16.self)
-        if minutesSinceActivation != 0xffff {
-            self.faultEventTimeSinceActivation = TimeInterval(minutes: Double(minutesSinceActivation))
+        let faultTime = encodedData[9...10].toBigEndian(UInt16.self)
+        /// For pod reset faults, this value can be $ffff (Eros or O5) and $0000 for (DASH).
+        /// Never return any of these dubious values as a possible valid pod fault time.
+        if faultTime != 0xffff && faultTime != 0 {
+            self.faultEventTimeSinceActivation = TimeInterval(minutes: Double(faultTime))
         } else {
             self.faultEventTimeSinceActivation = nil
         }
