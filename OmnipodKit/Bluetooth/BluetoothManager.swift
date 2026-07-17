@@ -472,7 +472,11 @@ class BluetoothManager: NSObject {
         log.default("BluetoothManager #%{public}@ INIT (podType=%{public}@)", instanceID, String(describing: podType))
 
         managerQueue.sync {
+#if os(iOS) // watchOS has no CoreBluetooth state restoration; the watch host owns reconnect policy
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])
+#else
+            self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
+#endif
         }
 
         // Track foreground/background so we can tell an iOS background wake/relaunch (everFg stays
@@ -992,6 +996,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
     }
 
+#if os(iOS) // watchOS has no CoreBluetooth state restoration (willRestoreState / restored-state keys are iOS-only)
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         log.info("Omni %{public}@: %{public}@", #function, dict)
@@ -1012,6 +1017,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             }
         }
     }
+#endif
 
     /// The DASH "clear / no alert" status word (see DASH_BEACON_FINDINGS.md). Any other value while
     /// the pod is otherwise healthy indicates an active alert/alarm.

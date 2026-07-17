@@ -143,6 +143,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
                 .store(in: &cancellables)
         }
 
+#if os(iOS) // watchOS: no UIApplication lifecycle notifications or audio keepalive; the watch host owns process lifetime
         if podType.isDash {
             let nc = NotificationCenter.default
             nc.addObserver(
@@ -161,6 +162,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
             // Needed setup if pod keep alives might be used
             podKeepAliveSetup(refresh: refresh)
         }
+#endif
     }
 
     func refresh() {
@@ -429,6 +431,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
         }
     }
 
+#if os(iOS) // watchOS: BackgroundTask (PumpManagerUI keepalive helper) is excluded from the watchOS target
     private let backgroundTask = BackgroundTask()
     @objc func appMovedToBackground() {
         backgroundTask.startBackgroundTask(hasPod: state.podState != nil)
@@ -437,6 +440,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
     @objc func appMovedToForeground() {
         backgroundTask.stopBackgroundTask()
     }
+#endif
 
 
     // MARK: - RileyLink specific vars and funcs
@@ -942,6 +946,7 @@ extension OmniPumpManager {
         return false
     }
 
+#if os(iOS) // watchOS: ReservoirLevelHighlightState is declared in PumpManagerUI (excluded); only UI consumes this property
     var reservoirLevelHighlightState: ReservoirLevelHighlightState? {
         guard let reservoirLevel = reservoirLevel else {
             return nil
@@ -960,6 +965,7 @@ extension OmniPumpManager {
             }
         }
     }
+#endif
 
     func buildPumpLifecycleProgress(for state: OmniPumpManagerState) -> PumpLifecycleProgress? {
         switch podCommState {
@@ -1354,6 +1360,7 @@ extension OmniPumpManager {
                             // Have new podState, reset all the per pod pump manager state
                             self.resetPerPodPumpManagerState()
 
+#if os(iOS) // watchOS: keepalive Storage lives in PumpManagerUI (excluded); iPhone InPlay workaround does not apply
                             if self.usingInPlayPod == true && self.iPhoneWithPossibleInPlayIssues {
                                 if Storage.shared.podKeepAlive.value == .disabled {
                                     // Enable the most conservative pod keep alive mode
@@ -1362,6 +1369,7 @@ extension OmniPumpManager {
                                     Storage.shared.podKeepAlive.value = .whenOpen
                                 }
                             }
+#endif
 
                             self.pumpDelegate.notify { (delegate) in
                                 delegate?.pumpManagerPumpWasReplaced(self)
@@ -2210,13 +2218,16 @@ extension OmniPumpManager {
     // Running on any iPhone 16 or an iPhone 17e which are known
     // to have BLE reconnect issues with InPlay BLE DASH pods?
     var iPhoneWithPossibleInPlayIssues: Bool {
-
+#if os(iOS) // watchOS: UIDevice is unavailable and a watch host is never an affected iPhone model
         let iPhoneModel = UIDevice.modelName
         if iPhoneModel.contains("iPhone 16") || iPhoneModel == "iPhone 17e" {
             return true
         }
 
         return false
+#else
+        return false
+#endif
     }
 
     // Using an InPlay BLE pod?
