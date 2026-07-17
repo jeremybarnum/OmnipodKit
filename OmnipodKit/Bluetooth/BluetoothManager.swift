@@ -145,7 +145,11 @@ class BluetoothManager: NSObject {
         super.init()
 
         managerQueue.sync {
+#if os(iOS) // watchOS has no CoreBluetooth state restoration; the watch host owns reconnect policy
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])
+#else
+            self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
+#endif
         }
     }
     
@@ -373,6 +377,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
     }
 
+#if os(iOS) // watchOS has no CoreBluetooth state restoration (willRestoreState / restored-state keys are iOS-only)
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         log.info("Omni %{public}@: %{public}@", #function, dict)
@@ -393,6 +398,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             }
         }
     }
+#endif
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         dispatchPrecondition(condition: .onQueue(managerQueue))

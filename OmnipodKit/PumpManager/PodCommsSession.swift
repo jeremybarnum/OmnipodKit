@@ -386,8 +386,10 @@ class PodCommsSession: MessageTransportDelegate {
                 throw error
             }
 
+#if os(iOS) // watchOS: pod keepalive (PumpManagerUI/PodKeepAliveView.swift) is excluded from the watchOS target
             // Inform the pod keep alive code that we just received a pod response.
             gotPodResponse() // XXX move down to transport code?
+#endif
 
             // Simulate fault
             //let podInfoResponse = try PodInfoResponse(encodedData: Data(hexadecimalString: "0216020d0000000000ab6a038403ff03860000285708030d0000")!)
