@@ -46,6 +46,24 @@ class BlePodComms: PodComms {
         }
     }
 
+    // PODLOAN: deliberately stop bidding for the pod's single BLE connection so a
+    // second controller (the watch) holds it uncontested. Pod state, pairing and
+    // keys untouched. Reverse: rearmConnection().
+    func releaseConnection() {
+        if let bleIdentifier = podState?.bleIdentifier {
+            bluetoothManager.disconnectFromDevice(uuidString: bleIdentifier)
+        }
+    }
+
+    // PODLOAN: resume bidding after a loan ends. connectToDevice materializes the
+    // peripheral via retrievePeripherals and connects; the session re-establishes
+    // on next contact (pod-side EAP resynchronization).
+    func rearmConnection() {
+        if let bleIdentifier = podState?.bleIdentifier {
+            bluetoothManager.connectToDevice(uuidString: bleIdentifier)
+        }
+    }
+
     override func forgetPod() {
         bluetoothManager.setUuidPdmId(nil)
         if let manager = manager {
