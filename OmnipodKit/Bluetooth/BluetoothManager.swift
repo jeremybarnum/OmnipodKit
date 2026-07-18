@@ -107,12 +107,18 @@ protocol OmniConnectionDelegate: AnyObject {
     /// connects on demand and reads the real pod status, which surfaces the alert to Loop via the
     /// normal getPodStatus -> alertsChanged -> issueAlert path. `slots` is the decoded firing AlertSet.
     func omnipodDidDetectAlert(slots: AlertSet)
+
+    /// PODLOAN: a loan takeover scan adopted the pod as `uuidString` (this device's own
+    /// peripheral UUID). The delegate must record it as the pod's bleIdentifier so the
+    /// connection/session path recognizes the peripheral.
+    func omnipodDidAdoptLoanPod(uuidString: String)
 }
 
 extension OmniConnectionDelegate {
     func omnipodLogDeviceEvent(_ message: String) {}
     func omnipodHeartbeatDidFire() {}
     func omnipodDidDetectAlert(slots: AlertSet) {}
+    func omnipodDidAdoptLoanPod(uuidString: String) {}   // PODLOAN: default no-op
 }
 
 
@@ -158,8 +164,28 @@ class BluetoothManager: NSObject {
         }
     }
 
+    /// PODLOAN: when a watch takes over a pod paired by another device (a loan), the
+    /// phone's stored `bleIdentifier` is a per-device CoreBluetooth UUID that means
+    /// nothing here — retrievePeripherals returns nothing. Instead we scan and adopt the
+    /// pod by its advertised address (global). Set to the pod's address to arm takeover;
+    /// cleared once adopted.
+    private var loanTakeoverPodId: UInt32? = nil
+
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
+
+    /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the
+    /// peripheral this device discovers (its own CoreBluetooth UUID), rather than the
+    /// foreign identifier from the granted pod state.
+    func beginLoanTakeover(podId: UInt32) {
+        managerQueue.async {
+            self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
+            self.loanTakeoverPodId = podId
+            if self.manager.state == .poweredOn, !self.manager.isScanning {
+                self.startScanning()
+            }
+        }
+    }
 
     /// The O5 changes its service advertisement uuid from using FFFFFFFE the pdmId after pairing.
     /// This func is called to set this value to be used in uuid after pairing and with a nil (or 0) to reset.
@@ -1216,20 +1242,34 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
             addPeripheral(peripheral, podAdvertisement: podAdvertisement)
 
-            if discoveryModeEnabled {
-                connectionDelegate?.omnipodLogDeviceEvent("[pairing] heard pod \(peripheral.identifier.uuidString) pairable=\(podAdvertisement.pairable) state=\(peripheral.state.rawValue)")
-            }
-            if discoveryModeEnabled && podAdvertisement.pairable {
-                // We've heard our target pairable pod — stop the discovery scan so it doesn't starve the
-                // connect (an active allowDuplicates scan wedges the connect in .connecting, which is
-                // what stalled pairing), then connect if it's disconnected. If it's already mid-connect,
-                // stopping the scan lets that connect complete.
-                if manager.isScanning { manager.stopScan() }
-                if peripheral.state == .disconnected {
-                    log.default("Connecting to pairable device %{public}@ in discovery mode", peripheral)
-                    connectionDelegate?.omnipodLogDeviceEvent("[pairing] connecting to pairable pod \(peripheral.identifier.uuidString)")
-                    timedConnect(peripheral)  // pairing — an explicit connect, not auto-reconnect
+            // PODLOAN: adopt an already-paired pod by its advertised ADDRESS. A pod paired on
+            // another device stores that device's per-device CoreBluetooth UUID, which means
+            // nothing here — the address is the only identifier both devices agree on. Match it,
+            // record THIS device's identifier as the pod's, and connect; the session
+            // re-establishes from the granted keys.
+            if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected {
+                let adopted = peripheral.identifier.uuidString
+                log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
+                loanTakeoverPodId = nil
+                autoConnectIDs.insert(adopted)
+                connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
+                timedConnect(peripheral)  // takeover — an explicit connect, not auto-reconnect
+            } else {
+                if discoveryModeEnabled {
+                    connectionDelegate?.omnipodLogDeviceEvent("[pairing] heard pod \(peripheral.identifier.uuidString) pairable=\(podAdvertisement.pairable) state=\(peripheral.state.rawValue)")
                 }
+                if discoveryModeEnabled && podAdvertisement.pairable {
+                    // We've heard our target pairable pod — stop the discovery scan so it doesn't starve the
+                    // connect (an active allowDuplicates scan wedges the connect in .connecting, which is
+                    // what stalled pairing), then connect if it's disconnected. If it's already mid-connect,
+                    // stopping the scan lets that connect complete.
+                    if manager.isScanning { manager.stopScan() }
+                    if peripheral.state == .disconnected {
+                        log.default("Connecting to pairable device %{public}@ in discovery mode", peripheral)
+                        connectionDelegate?.omnipodLogDeviceEvent("[pairing] connecting to pairable pod \(peripheral.identifier.uuidString)")
+                        timedConnect(peripheral)  // pairing — an explicit connect, not auto-reconnect
+                    }
+            }
             } else if autoConnectIDs.contains(peripheral.identifier.uuidString) && peripheral.state == .disconnected {
                 log.debug("Reonnecting to autoconnect device")
                 autoReconnect(peripheral)

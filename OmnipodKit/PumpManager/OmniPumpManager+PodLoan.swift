@@ -82,6 +82,19 @@ extension OmniPumpManager {
         return String(describing: fault.faultEventCode)
     }
 
+    /// PODLOAN: begin a cross-device loan takeover. The granted pod state's
+    /// `bleIdentifier` is the PHONE's per-device CoreBluetooth UUID and is useless here,
+    /// so we scan for the pod by its (global) message address and adopt the peripheral
+    /// THIS device discovers. The session then re-establishes from the granted keys.
+    /// Call once, right after constructing the manager from the grant, before reading
+    /// status. Returns false if there's no address to scan for.
+    @discardableResult
+    public func podLoanBeginTakeover() -> Bool {
+        guard let address = state.podState?.address else { return false }
+        (podComms as? BlePodComms)?.beginLoanTakeover(podId: address)
+        return true
+    }
+
     /// A REAL status read, bypassing the freshness optimization (getPodStatus is
     /// internal and ensureCurrentPumpData skips the read unless data is stale — neither
     /// serves a takeover-proof or a verdict chase). Completion: true when a status

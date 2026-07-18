@@ -46,6 +46,21 @@ class BlePodComms: PodComms {
         }
     }
 
+    // PODLOAN: adopt a pod paired by ANOTHER device (a loan takeover) by scanning for
+    // its advertised address, since the granted pod state's bleIdentifier is a foreign
+    // per-device CoreBluetooth UUID that this device can't retrieve.
+    func beginLoanTakeover(podId: UInt32) {
+        bluetoothManager.beginLoanTakeover(podId: podId)
+    }
+
+    // PODLOAN: the takeover scan found and adopted the pod; record THIS device's
+    // peripheral UUID as the pod's bleIdentifier so the connect/session path (which
+    // gates on peripheral.identifier == podState.bleIdentifier) recognizes it.
+    func omnipodDidAdoptLoanPod(uuidString: String) {
+        log.default("PODLOAN: adopted pod bleIdentifier %{public}@", uuidString)
+        podState?.bleIdentifier = uuidString
+    }
+
     // PODLOAN: deliberately stop bidding for the pod's single BLE connection so a
     // second controller (the watch) holds it uncontested. Pod state, pairing and
     // keys untouched. Reverse: rearmConnection().
