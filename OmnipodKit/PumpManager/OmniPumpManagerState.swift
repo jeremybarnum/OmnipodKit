@@ -20,7 +20,16 @@ public struct OmniPumpManagerState: RawRepresentable, Equatable {
     var isOnboarded: Bool = false
 
     // XXX still needs be declared public with the current Trio implementation
-    public private(set) var podState: PodState?
+    // PODLOAN: internal(set) so the ringfenced +PodLoan file can truncate the running
+    // temp basal's RECORD at the moment the pod changes hands. The pod keeps delivering
+    // the temp it was given; what must not happen is both controllers booking the same
+    // minutes. Was private(set).
+    internal(set) public var podState: PodState?
+
+    // PODLOAN: true while the pod's BLE connection is deliberately released
+    // (loaned to another controller). Persisted so an app relaunch mid-loan cannot
+    // silently re-arm the connection and steal the pod back.
+    public var podConnectionReleased: Bool = false
 
     // State should only be modifiable by PodComms
     mutating func updatePodStateFromPodComms(_ podState: PodState?) {
@@ -315,6 +324,8 @@ public struct OmniPumpManagerState: RawRepresentable, Equatable {
 
         self.podAttachmentConfirmed = rawValue["podAttachmentConfirmed"] as? Bool ?? false
 
+        self.podConnectionReleased = rawValue["podConnectionReleased"] as? Bool ?? false   // PODLOAN
+
         self.initialConfigurationCompleted = rawValue["initialConfigurationCompleted"] as? Bool ?? true
 
         self.acknowledgedTimeOffsetAlert = rawValue["acknowledgedTimeOffsetAlert"] as? Bool ?? false
@@ -367,6 +378,7 @@ public struct OmniPumpManagerState: RawRepresentable, Equatable {
             "confirmationBeeps": confirmationBeeps.rawValue,
             "activeAlerts": activeAlerts.map { $0.rawValue },
             "podAttachmentConfirmed": podAttachmentConfirmed,
+            "podConnectionReleased": podConnectionReleased,   // PODLOAN
             "acknowledgedTimeOffsetAlert": acknowledgedTimeOffsetAlert,
             "alertsWithPendingAcknowledgment": alertsWithPendingAcknowledgment.map { $0.rawValue },
             "initialConfigurationCompleted": initialConfigurationCompleted,

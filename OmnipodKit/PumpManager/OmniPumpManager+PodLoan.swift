@@ -16,9 +16,21 @@
 //  the loan journal's provenance tags. This file adds ONLY the outward report; the
 //  chase timing and journal consequences live in app code (never in the driver).
 //
-//  Phone-side surface (releaseConnection/rearmConnection, C5 handover semantics,
-//  ported from the OmniBLE fork's pod-loan branch @ eb8f6c3) lands in this same file
-//  with the phone controller work — one file per module, per R11.
+//  Phone-side surface: the PumpConnectionLendable conformance below (ported from the
+//  OmniBLE fork's pod-loan branch @ eb8f6c3/c6c37f9) — the phone deliberately stops
+//  bidding for the pod's single BLE connection at grant and re-arms at reclaim, with
+//  the C5 record truncation at the handover stamp (R2).
+//
+//  COMPLETE FOOTPRINT — audit the whole feature with:  grep -rn "PODLOAN" OmnipodKit/
+//   • This file — all behavior.
+//   • OmniPumpManagerState.swift — persisted `podConnectionReleased` (declaration,
+//     decode, encode) + podState promoted private(set)→internal(set) for C5. Tagged.
+//   • OmniPumpManager.swift — podComms and setState promoted private→internal;
+//     init-time restore of a persisted release. Tagged.
+//   • Bluetooth/BlePodComms.swift — releaseConnection()/rearmConnection(): the
+//     BLE-layer disarm/re-arm of the standing auto-connect. Tagged.
+//   • (LoopKit) DeviceManager/PumpManager.swift — the PumpConnectionLendable
+//     protocol the Loop app talks to. Tagged.
 //
 
 import Foundation
@@ -115,6 +127,44 @@ extension OmniPumpManager {
         }
     }
 
+    // MARK: - PumpConnectionLendable (the phone half)
+
+    /// True while the pod's connection is deliberately released (on loan).
+    public var isConnectionReleased: Bool {
+        return state.podConnectionReleased
+    }
+
+    /// Deliberately stop bidding for the pod's BLE connection so another controller
+    /// (the watch) can hold it uncontested. Pod state, pairing and keys are untouched;
+    /// persisted across relaunches. Reverse: reclaimConnection().
+    public func releaseConnection() {
+        let handedOverAt = Date()
+        setState { (state) in
+            state.podConnectionReleased = true
+            // C5 (loan-boundary accounting, R2): close this phone's RECORD of a running
+            // temp basal at the handover stamp. The pod keeps physically running the
+            // temp until the watch's first command supersedes it — that gap window is
+            // deliberately unjournaled and covered by the hand-back odometer audit.
+            // Without this truncation the mutable dose entry finalizes at its full
+            // programmed extent and OVERLAPS the watch journal's entries for the same
+            // wall-clock window, double-counting the deviation.
+            if let tempBasal = state.podState?.unfinalizedTempBasal, !tempBasal.isFinished(at: handedOverAt) {
+                state.podState?.unfinalizedTempBasal?.cancel(at: handedOverAt)
+            }
+        }
+        (podComms as? BlePodComms)?.releaseConnection()
+    }
+
+    /// Resume bidding for the pod's BLE connection after a loan ends. The standing
+    /// connect re-arms; the session re-establishes on next contact and the next
+    /// status poll resynchronizes state.
+    public func reclaimConnection() {
+        setState { (state) in
+            state.podConnectionReleased = false
+        }
+        (podComms as? BlePodComms)?.rearmConnection()
+    }
+
     private static func podLoanKind(of pending: PendingCommand) -> PodLoanPendingKind {
         switch pending {
         case .program(let program, _, _, _):
@@ -151,3 +201,7 @@ extension OmniPumpManager {
         }
     }
 }
+
+// PODLOAN: the optional capability the Loop app discovers by conditional cast
+// ((pumpManager as? PumpConnectionLendable)?.releaseConnection()).
+extension OmniPumpManager: PumpConnectionLendable {}

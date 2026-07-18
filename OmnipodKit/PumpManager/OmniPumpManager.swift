@@ -126,6 +126,13 @@ public class OmniPumpManager: RileyLinkPumpManager {
         super.init(rileyLinkDeviceProvider: rileyLinkDeviceProvider)
 
         finishInit(podType: state.podType)
+
+        // PODLOAN: honor a persisted mid-loan release. BlePodComms auto-connects at
+        // construction from podState.bleIdentifier; a relaunch during a loan must not
+        // steal the pod back from the watch, so disarm immediately.
+        if state.podConnectionReleased {
+            (podComms as? BlePodComms)?.releaseConnection()
+        }
     }
 
     // Common initialization used after all mandatory fields are initialized
@@ -187,7 +194,9 @@ public class OmniPumpManager: RileyLinkPumpManager {
         deviceProvider.delegate = self
     }
 
-    private var podComms: PodComms {
+    // PODLOAN: internal (was private) so the ringfenced +PodLoan file can drive
+    // the BLE layer's release/re-arm.
+    internal var podComms: PodComms {
         get {
             return lockedPodComms.value
         }
@@ -214,7 +223,9 @@ public class OmniPumpManager: RileyLinkPumpManager {
         return lockedState.value
     }
 
-    private func setState(_ changes: (_ state: inout OmniPumpManagerState) -> Void) -> Void {
+    // PODLOAN: internal (was private) so the ringfenced +PodLoan file can set the
+    // release flag and apply the C5 record truncation.
+    internal func setState(_ changes: (_ state: inout OmniPumpManagerState) -> Void) -> Void {
         return setStateWithResult(changes)
     }
 
