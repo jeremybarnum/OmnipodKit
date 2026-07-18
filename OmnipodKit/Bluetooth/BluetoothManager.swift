@@ -137,10 +137,17 @@ class BluetoothManager: NSObject {
     /// foreign identifier from the granted pod state.
     func beginLoanTakeover(podId: UInt32) {
         managerQueue.async {
-            self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
             self.loanTakeoverPodId = podId
-            if self.manager.state == .poweredOn, !self.manager.isScanning {
-                self.startScanning()
+            if self.manager.state == .poweredOn {
+                self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
+                if !self.manager.isScanning {
+                    self.startScanning()
+                }
+            } else {
+                // The common case: takeover arms milliseconds after the central is
+                // created, before it reaches poweredOn. centralManagerDidUpdateState
+                // starts the scan (its condition consults loanTakeoverPodId).
+                self.log.default("PODLOAN: takeover armed for pod 0x%x; scan starts at poweredOn", podId)
             }
         }
     }
@@ -393,9 +400,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
             updateConnections()
             
-            if (discoveryModeEnabled || !hasDiscoveredAllAutoConnectDevices) && !manager.isScanning {
+            // PODLOAN: an armed takeover is a first-class scan reason. beginLoanTakeover
+            // races this central to poweredOn (it arms milliseconds after init), and the
+            // takeover's autoConnectIDs are empty (the grant rides a released connection),
+            // which makes hasDiscoveredAllAutoConnectDevices vacuously true — the stock
+            // condition alone would never scan.
+            if (discoveryModeEnabled || loanTakeoverPodId != nil || !hasDiscoveredAllAutoConnectDevices) && !manager.isScanning {
                 startScanning()
-            } else if !discoveryModeEnabled && manager.isScanning {
+            } else if !discoveryModeEnabled && loanTakeoverPodId == nil && manager.isScanning {
                 stopScanning()
             }
         }
@@ -465,7 +477,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.info("Ignoring peripheral with unexpected advertisement data: %{public}@", advertisementData)
         }
         
-        if !discoveryModeEnabled && central.isScanning && hasDiscoveredAllAutoConnectDevices {
+        // PODLOAN: never stop while a takeover is armed — with empty autoConnectIDs,
+        // hasDiscoveredAllAutoConnectDevices is vacuously true and the first discovery
+        // of ANY peripheral would otherwise kill the takeover scan.
+        if !discoveryModeEnabled && loanTakeoverPodId == nil && central.isScanning && hasDiscoveredAllAutoConnectDevices {
             log.debug("All peripherals discovered")
             stopScanning()
         }
