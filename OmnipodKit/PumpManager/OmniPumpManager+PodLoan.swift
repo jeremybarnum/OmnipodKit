@@ -203,5 +203,15 @@ extension OmniPumpManager {
 }
 
 // PODLOAN: the optional capability the Loop app discovers by conditional cast
-// ((pumpManager as? PumpConnectionLendable)?.releaseConnection()).
-extension OmniPumpManager: PumpConnectionLendable {}
+// ((pumpManager as? PumpConnectionLendable)?.releaseConnection()). The audit surface
+// forwards to the seam accessors above — the app never names OmnipodKit types
+// (pumps load as plugins).
+extension OmniPumpManager: PumpConnectionLendable {
+    public var lentDeviceInsulinDelivered: Double? {
+        return podLoanInsulinDelivered
+    }
+
+    public func refreshLentDeviceStatus(completion: @escaping (Bool) -> Void) {
+        podLoanReadStatus(completion: completion)
+    }
+}
