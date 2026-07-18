@@ -87,6 +87,14 @@ protocol OmniConnectionDelegate: AnyObject {
      */
     func omnipodPeripheralDidFailToConnect(peripheral: CBPeripheral, error: Error?)
 
+    /// PODLOAN: a loan takeover scan adopted the pod as `uuidString` (this device's own
+    /// peripheral UUID). The delegate must record it as the pod's bleIdentifier so the
+    /// connection/session path recognizes the peripheral.
+    func omnipodDidAdoptLoanPod(uuidString: String)
+}
+
+extension OmniConnectionDelegate {
+    func omnipodDidAdoptLoanPod(uuidString: String) {}   // PODLOAN: default no-op
 }
 
 
@@ -114,8 +122,28 @@ class BluetoothManager: NSObject {
         }
     }
 
+    /// PODLOAN: when a watch takes over a pod paired by another device (a loan), the
+    /// phone's stored `bleIdentifier` is a per-device CoreBluetooth UUID that means
+    /// nothing here — retrievePeripherals returns nothing. Instead we scan and adopt the
+    /// pod by its advertised address (global). Set to the pod's address to arm takeover;
+    /// cleared once adopted.
+    private var loanTakeoverPodId: UInt32? = nil
+
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
+
+    /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the
+    /// peripheral this device discovers (its own CoreBluetooth UUID), rather than the
+    /// foreign identifier from the granted pod state.
+    func beginLoanTakeover(podId: UInt32) {
+        managerQueue.async {
+            self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
+            self.loanTakeoverPodId = podId
+            if self.manager.state == .poweredOn, !self.manager.isScanning {
+                self.startScanning()
+            }
+        }
+    }
 
     /// The O5 changes its service advertisement uuid from using FFFFFFFE the pdmId after pairing.
     /// This func is called to set this value to be used in uuid after pairing and with a nil (or 0) to reset.
@@ -411,8 +439,19 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
             addPeripheral(peripheral, podAdvertisement: podAdvertisement)
-            
-            if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
+
+            // PODLOAN: adopt an already-paired pod by its advertised ADDRESS (the phone's
+            // per-device peripheral UUID is useless here). Match, record THIS device's
+            // identifier as the pod's, and connect — the session re-establishes from the
+            // granted keys.
+            if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected {
+                let adopted = peripheral.identifier.uuidString
+                log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
+                loanTakeoverPodId = nil
+                autoConnectIDs.insert(adopted)
+                connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
+                manager.connect(peripheral, options: nil)
+            } else if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
                 // Connect to any pairable device, during discovery
                 log.default("Connecting to pairable device %{public} in discovery mode", peripheral)
                 manager.connect(peripheral, options: nil)
