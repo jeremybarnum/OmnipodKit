@@ -58,6 +58,18 @@ extension OmniPumpManager {
         return Self.podLoanKind(of: pending)
     }
 
+    /// The pod's cumulative-delivered odometer as last reported (R12: the audit, never
+    /// the source). Freshen with podLoanReadStatus before snapshotting (OQ-5).
+    public var podLoanInsulinDelivered: Double? {
+        return state.podState?.lastInsulinMeasurements?.delivered
+    }
+
+    /// True while a pod fault is active — rides StatusReport.podFault (spec §6).
+    public var podLoanFaultDescription: String? {
+        guard let fault = state.podState?.fault else { return nil }
+        return String(describing: fault.faultEventCode)
+    }
+
     /// A REAL status read, bypassing the freshness optimization (getPodStatus is
     /// internal and ensureCurrentPumpData skips the read unless data is stale — neither
     /// serves a takeover-proof or a verdict chase). Completion: true when a status
