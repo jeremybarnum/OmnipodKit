@@ -91,6 +91,14 @@ extension OmniPumpManager {
     @discardableResult
     public func podLoanBeginTakeover() -> Bool {
         guard let address = state.podState?.address else { return false }
+        // The grant snapshot was serialized AFTER the phone released the connection, so
+        // it arrives stamped podConnectionReleased=true. On THIS device that stamp is a
+        // lie — the takeover is about to own the pod — and leaving it set both replays
+        // the init-time disarm on every relaunch mid-loan and (with autoConnectIDs
+        // emptied by that disarm) starves the poweredOn scan trigger.
+        setState { (state) in
+            state.podConnectionReleased = false
+        }
         (podComms as? BlePodComms)?.beginLoanTakeover(podId: address)
         return true
     }

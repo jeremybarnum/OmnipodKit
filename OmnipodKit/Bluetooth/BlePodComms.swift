@@ -58,7 +58,19 @@ class BlePodComms: PodComms {
     // gates on peripheral.identifier == podState.bleIdentifier) recognizes it.
     func omnipodDidAdoptLoanPod(uuidString: String) {
         log.default("PODLOAN: adopted pod bleIdentifier %{public}@", uuidString)
+        // Safe to lock here: adoption happens strictly pre-connect (didDiscover gates on
+        // .disconnected), and every other podState mutator runs inside a session, which
+        // requires a connected pod — so no holder can be waiting on this queue.
+        podStateLock.lock()
+        let stale = podState?.bleIdentifier
         podState?.bleIdentifier = uuidString
+        podStateLock.unlock()
+        // The foreign (phone-local) identifier must not linger in autoConnectIDs: it can
+        // never be discovered on this device, so it would pin hasDiscoveredAllAutoConnect-
+        // Devices false and keep the radio scanning for the entire loan.
+        if let stale = stale, stale != uuidString {
+            bluetoothManager.disconnectFromDevice(uuidString: stale)
+        }
     }
 
     // PODLOAN: deliberately stop bidding for the pod's single BLE connection so a
