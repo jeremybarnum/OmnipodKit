@@ -155,6 +155,25 @@ extension OmniPumpManager {
         return state.podConnectionReleased
     }
 
+    /// The pod peripheral's ACTUAL CoreBluetooth state, for diagnosing reclaim failures.
+    /// `podLoanReadStatus` returns a bare Bool, so a run of failed reads could not
+    /// distinguish "peripheral wedged in .disconnecting" (the E4-v1 poisoning signature)
+    /// from "never reached .connected" from "connected but the status read failed" —
+    /// three different bugs that look identical from outside (2026-07-22: three theories
+    /// raised and falsified against exactly this blind spot). Read-only.
+    public var podLoanConnectionStateDescription: String {
+        guard let peripheral = (podComms as? BlePodComms)?.manager?.peripheral else {
+            return "no-peripheral"
+        }
+        switch peripheral.state {
+        case .disconnected:  return "disconnected"
+        case .connecting:    return "connecting"
+        case .connected:     return "connected"
+        case .disconnecting: return "DISCONNECTING(wedged?)"
+        @unknown default:    return "unknown(\(peripheral.state.rawValue))"
+        }
+    }
+
     /// Deliberately stop bidding for the pod's BLE connection so another controller
     /// (the watch) can hold it uncontested. Pod state, pairing and keys are untouched;
     /// persisted across relaunches. Reverse: reclaimConnection().
