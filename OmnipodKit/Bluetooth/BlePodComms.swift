@@ -53,6 +53,14 @@ class BlePodComms: PodComms {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
 
+#if os(watchOS)
+    // PODLOAN E4 (157): escalate a stalled reclaim to the takeover-grade recovery —
+    // fresh central + address scan-adopt. See BluetoothManager.escalateLoanReclaim.
+    func escalateLoanReclaim(podId: UInt32) {
+        bluetoothManager.escalateLoanReclaim(podId: podId)
+    }
+#endif
+
     // PODLOAN: the takeover scan found and adopted the pod; record THIS device's
     // peripheral UUID as the pod's bleIdentifier so the connect/session path (which
     // gates on peripheral.identifier == podState.bleIdentifier) recognizes it.
@@ -80,6 +88,12 @@ class BlePodComms: PodComms {
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.disconnectFromDevice(uuidString: bleIdentifier)
         }
+#if os(watchOS)
+        // PODLOAN E4 (157): a reclaim escalation may have armed the takeover-grade scan;
+        // releasing the pod ends the bid entirely, so the scan must not outlive it and
+        // contend with the G7 window. No-op when nothing is armed.
+        bluetoothManager.cancelLoanScan()
+#endif
     }
 
     // PODLOAN: resume bidding after a loan ends. connectToDevice materializes the

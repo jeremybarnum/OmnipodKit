@@ -103,6 +103,18 @@ extension OmniPumpManager {
         return true
     }
 
+    /// PODLOAN E4 (157): escalate a stalled reclaim to the takeover-grade recovery path.
+    /// The reclaim's bare pending-connect proved probabilistic in the field while the
+    /// scan-adopt takeover landed 4/4 from arbitrary idle — when the connect hasn't
+    /// settled mid-ladder, drop the central and scan for the pod by address instead.
+    /// No-op if there's no pod address. watchOS only; iOS never reclaims a loan.
+    public func podLoanEscalateReclaim() {
+        #if os(watchOS)
+        guard let address = state.podState?.address else { return }
+        (podComms as? BlePodComms)?.escalateLoanReclaim(podId: address)
+        #endif
+    }
+
     /// A REAL status read, bypassing the freshness optimization (getPodStatus is
     /// internal and ensureCurrentPumpData skips the read unless data is stale — neither
     /// serves a takeover-proof or a verdict chase). Completion: true when a status
