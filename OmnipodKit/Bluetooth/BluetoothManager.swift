@@ -187,7 +187,27 @@ class BluetoothManager: NSObject {
 #endif
         }
     }
-    
+
+#if os(watchOS)
+    /// PODLOAN E4 self-heal. The watch orphans the pod between doses; a reclaim that
+    /// stalls leaves the peripheral `.connecting`, and the following release cancels it —
+    /// which wedges it in `.disconnecting` and poisons the stack, so every subsequent
+    /// reclaim then fails until the app is relaunched. Relaunch works only because it
+    /// builds a FRESH `CBCentralManager`, so reproduce that in-process: drop the old
+    /// central (its pending connects/disconnects go with it) and build a new one.
+    /// `centralManagerDidUpdateState` re-retrieves and reconnects whatever is still in
+    /// `autoConnectIDs` once the new central powers on — the same path that recovers a
+    /// user-terminated restart. watchOS has no CB state restoration, so there is no
+    /// restore identifier to reconcile. Isolated to `managerQueue`.
+    private func recreateCentral() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        log.default("PODLOAN: recreating CBCentralManager to clear a wedged/stalled BLE stack")
+        manager.delegate = nil
+        devices.removeAll()
+        manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
+    }
+#endif
+
     @discardableResult
     private func addPeripheral(_ peripheral: CBPeripheral, podAdvertisement: PodAdvertisement?) -> Omni {
         dispatchPrecondition(condition: .onQueue(managerQueue))
@@ -293,9 +313,30 @@ class BluetoothManager: NSObject {
                     manager.connect(peripheral, options: nil)
                 }
             } else {
-                if peripheral.state == .connected || peripheral.state == .connecting {
+                switch peripheral.state {
+                case .connected:
                     log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
                     manager.cancelPeripheralConnection(peripheral)
+                case .connecting, .disconnecting:
+                    #if os(watchOS)
+                    // PODLOAN E4: cancelling a NON-settled connection wedges the peripheral
+                    // in .disconnecting and poisons the stack. Drop the whole central
+                    // instead — a clean teardown of the pending connect, no wedge. The pod
+                    // is already out of autoConnectIDs, so the fresh central stays quiet.
+                    log.default("updateConnections: peripheral not settled (%{public}@) — recreating central instead of cancelling", String(describing: peripheral.state.rawValue))
+                    recreateCentral()
+                    return
+                    #else
+                    // iOS (stock): cancel a pending connect; leave a disconnecting one.
+                    if peripheral.state == .connecting {
+                        log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
+                        manager.cancelPeripheralConnection(peripheral)
+                    }
+                    #endif
+                case .disconnected:
+                    break
+                @unknown default:
+                    break
                 }
             }
         }
