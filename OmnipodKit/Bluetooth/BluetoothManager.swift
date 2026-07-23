@@ -583,6 +583,36 @@ class BluetoothManager: NSObject {
         devices.removeAll()
         manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
     }
+
+    /// PODLOAN E4 reclaim escalation (157). A reclaim's bare pending-connect is
+    /// probabilistic after a long idle (field 2026-07-22: caught a 578s-idle pod, missed a
+    /// 518s-idle one) while the takeover's scan-and-adopt landed 4/4 from arbitrary state.
+    /// When the gentle connect hasn't landed mid-ladder, escalate to the takeover-grade
+    /// path: drop the central (clears the stalled pending connect) and arm the same
+    /// scan-adopt used at takeover. The new central's poweredOn handler then races BOTH
+    /// recovery paths — the autoConnectIDs re-connect and the address scan — and whichever
+    /// sees the pod first wins.
+    func escalateLoanReclaim(podId: UInt32) {
+        managerQueue.async {
+            self.log.default("PODLOAN: reclaim escalation — recreating central + arming scan-adopt for pod 0x%x", podId)
+            self.loanTakeoverPodId = podId
+            self.recreateCentral()
+        }
+    }
+
+    /// PODLOAN E4 (157): disarm an escalation scan that never found the pod. Called on
+    /// release so the scan cannot outlive the reclaim ladder and contend with the G7
+    /// window. No-op when nothing is armed (an adopt already cleared it).
+    func cancelLoanScan() {
+        managerQueue.async {
+            guard self.loanTakeoverPodId != nil else { return }
+            self.log.default("PODLOAN: cancelling unfinished reclaim-escalation scan")
+            self.loanTakeoverPodId = nil
+            if self.manager.state == .poweredOn, self.manager.isScanning, !self.discoveryModeEnabled {
+                self.manager.stopScan()
+            }
+        }
+    }
 #endif
 
     @discardableResult
