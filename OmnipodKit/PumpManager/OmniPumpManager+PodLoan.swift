@@ -167,6 +167,14 @@ extension OmniPumpManager {
         return state.podConnectionReleased
     }
 
+    /// True once the reclaimed connection is truly back — the pod peripheral is connected.
+    /// `reclaimConnection()` only re-arms the bid (rearmConnection); the actual BLE reconnect
+    /// lands seconds-to-minutes later, so post-hand-back UI keeps "Reclaiming…" up until this
+    /// turns true (distinct from `isConnectionReleased`, the loan flag, which clears at reclaim).
+    public var isConnectionReady: Bool {
+        return podLoanConnectionStateDescription == "connected"
+    }
+
     /// The pod peripheral's ACTUAL CoreBluetooth state, for diagnosing reclaim failures.
     /// `podLoanReadStatus` returns a bare Bool, so a run of failed reads could not
     /// distinguish "peripheral wedged in .disconnecting" (the E4-v1 poisoning signature)
