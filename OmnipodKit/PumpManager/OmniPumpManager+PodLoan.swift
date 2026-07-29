@@ -119,16 +119,36 @@ extension OmniPumpManager {
             // temp rides doseHistory as a mutable full-span record; a superseded one arrives
             // finished. liveTempEnd doubles as the rate-0 restore (a 0 U/hr temp's programmed
             // span is unrecoverable from the cancel math — 0/0 — but the record carries it).
-            if var tempBasal = state.podState?.unfinalizedTempBasal,
-               let recordStart = liveTempStart,
-               abs(recordStart.timeIntervalSince(tempBasal.startTime)) < 2.0,
-               tempBasal.podLoanRearmHandoverCancel(programmedEnd: liveTempEnd) {
-                state.podState?.unfinalizedTempBasal = tempBasal
-                rearmedTemp = tempBasal
+            if let recordStart = liveTempStart {
+                rearmedTemp = state.podState?.podLoanRearmInheritedTempBasal(liveTempStart: recordStart, liveTempEnd: liveTempEnd)
             }
         }
         if let tempBasal = rearmedTemp {
             log.default("PODLOAN #72: re-armed inherited running temp — %{public}@", String(describing: tempBasal))
+            // PODLOAN #72 copy-divergence fix (2026-07-29, first shadow-ledger field session):
+            // the setState above mutates only the MANAGER's PodState copy, but every
+            // PodCommsSession is built from podComms' OWN copy — which still carries the C5
+            // cancel. Without this push the first status read reports the inherited temp
+            // finished-truncated (immutable), that row tombstones the raw in the DoseStore
+            // (store-trump merge; the mutable-only purge never removes it), and the first
+            // session write-back reverts the manager copy too — the re-arm was dead ~15s
+            // after this log line, freezing IOB at the handover stamp while the pod kept
+            // running the temp (observed as Δ(store−ledger) growing at exactly the unbooked
+            // remaining span). Same shared transform, applied under podStateLock BEFORE any
+            // connection exists.
+            if let blePodComms = podComms as? BlePodComms {
+                if let recordStart = liveTempStart,
+                   blePodComms.podLoanRearmInheritedTempBasal(liveTempStart: recordStart, liveTempEnd: liveTempEnd) {
+                    log.default("PODLOAN #72: re-arm propagated to comms copy — sessions report the live temp mutable")
+                } else {
+                    // Should be unreachable: both copies were value-copied from the same
+                    // rawState and the transform is deterministic — a genuine divergence
+                    // here means a mutation path we don't know about. Tripwire, keep loud.
+                    log.error("PODLOAN #72: comms-copy re-arm FAILED — copies diverged; store will freeze the inherited temp at the handover stamp")
+                }
+            } else {
+                log.error("PODLOAN #72: podComms is not BlePodComms — loan re-arm not applicable to this pod type; inherited temp stays closed at handover")
+            }
         } else if state.podState?.unfinalizedTempBasal?.scheduledUnits != nil {
             log.default("PODLOAN #72: inherited temp NOT re-armed (no matching live record — phone books say it finished); record stays closed at handover")
         }
@@ -330,6 +350,39 @@ extension OmniPumpManager: PumpConnectionLendable {
 
     public func refreshLentDeviceStatus(completion: @escaping (Bool) -> Void) {
         podLoanReadStatus(completion: completion)
+    }
+}
+
+extension PodState {
+    /// PODLOAN #72: the single guarded re-arm transform, shared by BOTH PodState copies
+    /// (the manager's lockedState and BlePodComms' session-facing copy — see
+    /// `podLoanRearmInheritedTempBasal` on BlePodComms for why both must be hit).
+    ///
+    /// GUARD (adversarial review, unchanged from the setState original): re-arm ONLY when the
+    /// grant's dose history ALSO says the temp is live (liveTempStart matches the record's
+    /// start ±2s). The C5 signature can outlive ground truth across back-to-back loans; the
+    /// phone's BOOKS distinguish the cases. liveTempEnd doubles as the rate-0 restore.
+    ///
+    /// Returns the re-armed dose, or nil when the guard rejects (no temp, start mismatch,
+    /// or no C5 signature — the transform is idempotent, so a second call is a clean nil).
+    ///
+    /// KNOWN CORNER (2026-07-29 adversarial review, accepted): after a FAILED hand-back, the
+    /// phone's books can still carry the temp as a live mutable row (no phone-pod contact to
+    /// correct them), so a re-grant re-arms a temp the watch itself superseded in the prior
+    /// epoch — overbooking its undelivered tail until the first status read finalizes it.
+    /// Deliberately NOT guarded away: refusing elapsed/stale spans would break the legitimate
+    /// natural-completion case (temp finished during the handover gap — its full span WAS
+    /// delivered and must book). The corner needs failed-hand-back + re-grant with zero
+    /// phone-pod contact, errs conservative (IOB high → less dosing), is watch-local, is
+    /// erased by the next takeover wipe, and the hand-back odometer audit bounds it.
+    mutating func podLoanRearmInheritedTempBasal(liveTempStart: Date, liveTempEnd: Date?) -> UnfinalizedDose? {
+        guard var tempBasal = unfinalizedTempBasal,
+              abs(liveTempStart.timeIntervalSince(tempBasal.startTime)) < 2.0,
+              tempBasal.podLoanRearmHandoverCancel(programmedEnd: liveTempEnd) else {
+            return nil
+        }
+        unfinalizedTempBasal = tempBasal
+        return tempBasal
     }
 }
 
