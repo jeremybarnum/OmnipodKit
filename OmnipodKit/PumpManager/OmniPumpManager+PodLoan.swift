@@ -89,18 +89,59 @@ extension OmniPumpManager {
     /// Call once, right after constructing the manager from the grant, before reading
     /// status. Returns false if there's no address to scan for.
     @discardableResult
-    public func podLoanBeginTakeover() -> Bool {
+    public func podLoanBeginTakeover(liveTempStart: Date? = nil, liveTempEnd: Date? = nil) -> Bool {
         guard let address = state.podState?.address else { return false }
         // The grant snapshot was serialized AFTER the phone released the connection, so
         // it arrives stamped podConnectionReleased=true. On THIS device that stamp is a
         // lie — the takeover is about to own the pod — and leaving it set both replays
         // the init-time disarm on every relaunch mid-loan and (with autoConnectIDs
         // emptied by that disarm) starves the poweredOn scan trigger.
+        var rearmedTemp: UnfinalizedDose?
         setState { (state) in
             state.podConnectionReleased = false
+            // PODLOAN #72 (2026-07-28): the phone's C5 record-close cancelled the running temp
+            // at the handover stamp INSIDE this blob (releaseConnection runs before rawValue is
+            // serialized), so the inherited copy arrives finished-at-handover and this device's
+            // re-reports would freeze IOB there while the pod keeps delivering. Re-arm it: the
+            // C5 cancel is exactly reversible (cancel(at:) stamps scheduledUnits = programmed
+            // total and scheduledTempRate = original rate, and NOTHING else ever sets those on
+            // an unfinalizedTempBasal). This device then tracks the LIVE temp: mutable
+            // re-reports every status read (IOB climbs with delivery), and updateDeliveryStatus
+            // books the truth at the end. The PHONE's own copy stays cancelled, so R2's
+            // record-close-at-handover and the hand-back accounting are untouched; this watch
+            // never journals the inherited temp.
+            //
+            // GUARD (adversarial review): re-arm ONLY when the grant's dose history ALSO says
+            // the temp is live (liveTempStart matches the record's start). The C5 signature can
+            // outlive ground truth across back-to-back loans (the phone's copy lingers finished-
+            // with-signature while a NEWER watch temp runs, because the prune branch needs
+            // !tempBasalRunning) — the phone's BOOKS distinguish the cases: a genuinely-live
+            // temp rides doseHistory as a mutable full-span record; a superseded one arrives
+            // finished. liveTempEnd doubles as the rate-0 restore (a 0 U/hr temp's programmed
+            // span is unrecoverable from the cancel math — 0/0 — but the record carries it).
+            if var tempBasal = state.podState?.unfinalizedTempBasal,
+               let recordStart = liveTempStart,
+               abs(recordStart.timeIntervalSince(tempBasal.startTime)) < 2.0,
+               tempBasal.podLoanRearmHandoverCancel(programmedEnd: liveTempEnd) {
+                state.podState?.unfinalizedTempBasal = tempBasal
+                rearmedTemp = tempBasal
+            }
+        }
+        if let tempBasal = rearmedTemp {
+            log.default("PODLOAN #72: re-armed inherited running temp — %{public}@", String(describing: tempBasal))
+        } else if state.podState?.unfinalizedTempBasal?.scheduledUnits != nil {
+            log.default("PODLOAN #72: inherited temp NOT re-armed (no matching live record — phone books say it finished); record stays closed at handover")
         }
         (podComms as? BlePodComms)?.beginLoanTakeover(podId: address)
         return true
+    }
+
+    /// PODLOAN #72 (instrumentation): the inherited/live running temp this device now tracks,
+    /// if any — for the watch controller's SportLog line at takeover.
+    public var podLoanLiveTempBasalDescription: String? {
+        guard let tempBasal = state.podState?.unfinalizedTempBasal, !tempBasal.isFinished() else { return nil }
+        guard let finishTime = tempBasal.finishTime else { return nil }
+        return String(format: "%.2f U/hr, %.0f min remaining", tempBasal.rate, finishTime.timeIntervalSinceNow / 60)
     }
 
     /// PODLOAN E4 (157): escalate a stalled reclaim to the takeover-grade recovery path.
@@ -215,6 +256,22 @@ extension OmniPumpManager {
         (podComms as? BlePodComms)?.releaseConnection()
     }
 
+    /// PODLOAN #72 (E4 fix, 2026-07-28 adversarial review): drop the pod's BLE connection
+    /// WITHOUT the C5 record-close. The C5 cancel in `releaseConnection()` is HANDOVER
+    /// accounting — this device stops being the controller, so its record of the running temp
+    /// closes at the stamp (R2). The watch's E4 orphaning between doses is NOT a handover:
+    /// the watch remains the controller and its books must keep tracking the running temp
+    /// (its own enacted temps AND a re-armed inherited one) across every release/reclaim
+    /// cycle. Before this split, each E4 release silently re-truncated the running temp at
+    /// the release stamp — killing live IOB tracking ~90s after takeover and quietly
+    /// under-booking long-running temps under NO-CHANGE verdicts.
+    public func podLoanOrphanConnection() {
+        setState { (state) in
+            state.podConnectionReleased = true
+        }
+        (podComms as? BlePodComms)?.releaseConnection()
+    }
+
     /// Resume bidding for the pod's BLE connection after a loan ends. The standing
     /// connect re-arms; the session re-establishes on next contact and the next
     /// status poll resynchronizes state.
@@ -273,5 +330,43 @@ extension OmniPumpManager: PumpConnectionLendable {
 
     public func refreshLentDeviceStatus(completion: @escaping (Bool) -> Void) {
         podLoanReadStatus(completion: completion)
+    }
+}
+
+extension UnfinalizedDose {
+    /// PODLOAN #72: reverse the C5 handover cancel on an INHERITED running temp, restoring its
+    /// programmed extent so the inheriting device tracks the live delivery.
+    ///
+    /// Exactly reversible because `cancel(at:)` stamps `scheduledUnits` = programmed total units
+    /// and `scheduledTempRate` = original rate before shortening — and nothing else ever sets
+    /// those fields on a temp basal, so their presence IS the C5 signature. Restoring clears
+    /// them, which also restores `uniqueKey` identity (`scheduledUnits ?? units` yields the same
+    /// programmed-total value either way) and makes the re-arm idempotent (second call finds
+    /// nil `scheduledUnits` and no-ops). Non-temps and never-cancelled temps are untouched.
+    ///
+    /// - Parameter programmedEnd: the grant dose record's programmed end — the ONLY way to
+    ///   restore a 0 U/hr temp (cancel leaves scheduledUnits=0, scheduledTempRate=0, so the
+    ///   span is unrecoverable as 0/0), and a cross-check fallback otherwise.
+    /// - Returns: true when a C5-cancelled temp was re-armed.
+    mutating func podLoanRearmHandoverCancel(programmedEnd: Date? = nil) -> Bool {
+        guard doseType == .tempBasal,
+              let programmedUnits = scheduledUnits,
+              let programmedRate = scheduledTempRate else {
+            return false
+        }
+        if programmedRate > 0 {
+            units = programmedUnits
+            duration = programmedUnits / programmedRate * 3600.0   // hours → seconds, exact inverse of units = rate × duration.hours
+        } else if let end = programmedEnd, end > startTime {
+            // Rate-0 temp (Loop's standard predicted-low): restore the span from the grant
+            // record; delivered units are 0 by definition.
+            units = 0
+            duration = end.timeIntervalSince(startTime)
+        } else {
+            return false   // rate-0 with no record end: span unrecoverable, leave closed
+        }
+        scheduledUnits = nil
+        scheduledTempRate = nil
+        return true
     }
 }
