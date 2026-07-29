@@ -49,6 +49,23 @@ class BlePodComms: PodComms {
     // PODLOAN: adopt a pod paired by ANOTHER device (a loan takeover) by scanning for
     // its advertised address, since the granted pod state's bleIdentifier is a foreign
     // per-device CoreBluetooth UUID that this device can't retrieve.
+    /// PODLOAN #72 copy-divergence fix: apply the shared inherited-temp re-arm to THIS
+    /// object's PodState copy — the one every PodCommsSession is built from and writes back.
+    /// The manager's setState re-arm alone is dead on arrival: sessions never see it, the
+    /// first status read reports the C5-truncated temp as an immutable DoseStore row
+    /// (store-trump tombstones the raw), and the session write-back reverts the manager
+    /// copy. Called at takeover-begin, before any connection (and thus any session) can
+    /// exist; the lock is held for the podState mutation invariant regardless.
+    /// NOTE: the in-place mutation fires PodComms.podState.didSet → manager didChange
+    /// SYNCHRONOUSLY under the held lock — same shape as the session write-back at the
+    /// bottom of this file; all outward notifications from that cascade are queue.async,
+    /// so nothing can re-enter this lock (adversarial-review verified).
+    func podLoanRearmInheritedTempBasal(liveTempStart: Date, liveTempEnd: Date?) -> Bool {
+        podStateLock.lock()
+        defer { podStateLock.unlock() }
+        return podState?.podLoanRearmInheritedTempBasal(liveTempStart: liveTempStart, liveTempEnd: liveTempEnd) != nil
+    }
+
     func beginLoanTakeover(podId: UInt32) {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }

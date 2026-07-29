@@ -143,6 +143,49 @@ class PodCommsSessionTests: XCTestCase, PodCommsSessionDelegate {
         XCTAssertEqual(inherited.finishTime!.timeIntervalSince1970, programmedFinish.timeIntervalSince1970, accuracy: 0.001)
     }
 
+    /// PODLOAN #72 copy-divergence fix: the PodState-level shared transform — the SAME guarded
+    /// re-arm now applied to both the manager's copy and BlePodComms' session-facing copy
+    /// (the 2026-07-29 field finding: the setState-only re-arm never reached the copy that
+    /// reports doses, so the store froze the inherited temp at the handover stamp).
+    func testPodLoanPodStateRearmSharedTransform() {
+        var temp = makeRunningTemp()
+        let programmedFinish = temp.finishTime!
+        let liveStart = temp.startTime
+        temp.cancel(at: Date())
+        podState.unfinalizedTempBasal = temp
+
+        // Matching live record → re-arm applies to the PodState in place.
+        let rearmed = podState.podLoanRearmInheritedTempBasal(liveTempStart: liveStart, liveTempEnd: programmedFinish)
+        XCTAssertNotNil(rearmed)
+        XCTAssertTrue(podState.unfinalizedTempBasal!.isMutable(),
+                      "the copy sessions report from must carry the temp LIVE — mutable full-span re-reports")
+        XCTAssertEqual(podState.unfinalizedTempBasal!.finishTime!.timeIntervalSince1970,
+                       programmedFinish.timeIntervalSince1970, accuracy: 0.001)
+
+        // Idempotent through the PodState layer too (signature cleared by the first pass).
+        XCTAssertNil(podState.podLoanRearmInheritedTempBasal(liveTempStart: liveStart, liveTempEnd: programmedFinish))
+    }
+
+    /// The shared transform must keep the adversarial-review guard: a live-record start that
+    /// doesn't match the inherited temp (superseded across back-to-back loans) is refused and
+    /// the PodState is left untouched.
+    func testPodLoanPodStateRearmRejectsMismatchedLiveRecord() {
+        var temp = makeRunningTemp()
+        temp.cancel(at: Date())
+        let cancelled = temp
+        podState.unfinalizedTempBasal = cancelled
+
+        let mismatchedStart = cancelled.startTime.addingTimeInterval(5.0)
+        XCTAssertNil(podState.podLoanRearmInheritedTempBasal(liveTempStart: mismatchedStart, liveTempEnd: nil))
+        XCTAssertFalse(podState.unfinalizedTempBasal!.isMutable(), "guard reject must leave the C5 cancel in place")
+        XCTAssertEqual(podState.unfinalizedTempBasal!.scheduledUnits, cancelled.scheduledUnits,
+                       "state untouched on reject — the C5 signature survives for a later matching re-arm")
+
+        // Empty PodState: clean nil, no crash.
+        podState.unfinalizedTempBasal = nil
+        XCTAssertNil(podState.podLoanRearmInheritedTempBasal(liveTempStart: Date(), liveTempEnd: nil))
+    }
+
     /// Selectivity + idempotency: re-arm touches ONLY C5-cancelled temps — a second call, a
     /// never-cancelled temp, and a cancelled bolus must all refuse.
     func testPodLoanRearmIdempotentAndSelective() {
