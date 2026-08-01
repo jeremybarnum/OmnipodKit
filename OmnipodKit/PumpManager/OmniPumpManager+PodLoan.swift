@@ -445,6 +445,7 @@ public enum PodLoanConnectClock {
     private static var _connectCount = 0
     private static var _lastReason: String?
     private static var _reasons: [String] = []
+    private static var _lastCensus: String?
 
     /// Set by the app so every BLE event can record what execution state we were in when it
     /// fired. #86: the flapping and the polling deferral were BOTH only ever observed overnight,
@@ -489,10 +490,14 @@ public enum PodLoanConnectClock {
         lock.unlock()
     }
 
-    public static func noteFailToConnect(error: Error? = nil) {
+    /// `census` is the caller's snapshot of what THIS process holds (see
+    /// BluetoothManager.peripheralCensus). Only recorded on failures — it is the field that
+    /// separates our own retry storm from slots consumed elsewhere on the device.
+    public static func noteFailToConnect(error: Error? = nil, census: String? = nil) {
         let d = describe(error), st = stateTag()
         lock.lock()
         _lastReason = d
+        _lastCensus = census ?? _lastCensus
         _reasons.append("x\(d)@\(st)")
         if _reasons.count > 12 { _reasons.removeFirst() }
         lock.unlock()
@@ -501,7 +506,7 @@ public enum PodLoanConnectClock {
     public static func reset() {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
-        _lastReason = nil; _reasons = []
+        _lastReason = nil; _reasons = []; _lastCensus = nil
         lock.unlock()
     }
 
@@ -511,12 +516,13 @@ public enum PodLoanConnectClock {
     public static func summary(since start: Date?) -> String {
         lock.lock()
         let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
-        let r = _lastReason, trail = _reasons
+        let r = _lastReason, trail = _reasons, cen = _lastCensus
         lock.unlock()
         guard let start = start else { return "cb: (no anchor)" }
         func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
         let why = r.map { " · \($0)" } ?? ""
         let tr = trail.isEmpty ? "" : " · trail[\(trail.joined(separator: " "))]"
-        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(why)\(tr)"
+        let cz = cen.map { " · held[\($0)]" } ?? ""
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(why)\(cz)\(tr)"
     }
 }

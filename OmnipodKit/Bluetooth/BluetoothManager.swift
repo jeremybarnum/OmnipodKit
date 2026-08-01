@@ -596,10 +596,31 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
     }
 
+    /// PODLOAN #86: what this process is holding, for the code-11 diagnosis. `devices` is our own
+    /// list; the state tally is what CoreBluetooth thinks each peripheral is doing right now.
+    /// `auto` is autoConnectIDs, which is the set the retry loop churns on — if it grows across
+    /// epochs that is a second leak, independent of the storm.
+    private func peripheralCensus() -> String {   // managerQueue
+        var connected = 0, connecting = 0, disconnected = 0, other = 0
+        for d in devices {
+            switch d.manager.peripheral.state {
+            case .connected:     connected += 1
+            case .connecting:    connecting += 1
+            case .disconnected:  disconnected += 1
+            default:             other += 1
+            }
+        }
+        return "devices=\(devices.count)(conn \(connected)/ing \(connecting)/dis \(disconnected)/other \(other)) auto=\(autoConnectIDs.count)"
+    }
+
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
-        PodLoanConnectClock.noteFailToConnect(error: error)   // PODLOAN #86
+        // PODLOAN #86: census at the moment of failure. CBErrorConnectionLimitReached (11) says
+        // the CONTROLLER is out of connection slots, and the only way to tell "our own storm" from
+        // "slots consumed outside this process" is to count what WE are holding when it fires.
+        // Two peripherals and still code 11 ⇒ not ours. A dozen ⇒ entirely ours.
+        PodLoanConnectClock.noteFailToConnect(error: error, census: peripheralCensus())
 
         log.error("%{public}@: %{public}@", #function, String(describing: error))
 
