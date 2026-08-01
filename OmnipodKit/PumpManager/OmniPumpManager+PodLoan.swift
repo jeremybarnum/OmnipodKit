@@ -443,34 +443,80 @@ public enum PodLoanConnectClock {
     private static var _lastConnectAt: Date?
     private static var _lastDisconnectAt: Date?
     private static var _connectCount = 0
+    private static var _lastReason: String?
+    private static var _reasons: [String] = []
 
-    /// Wall-clock of the most recent CBCentralManager didConnect for a pod peripheral.
+    /// Set by the app so every BLE event can record what execution state we were in when it
+    /// fired. #86: the flapping and the polling deferral were BOTH only ever observed overnight,
+    /// wrist-down. Sport Mode is the opposite regime — awake, moving, wrist live — and watchOS
+    /// schedules a moving workout app differently. Without this stamp we cannot tell whether a
+    /// drop belongs to the regime that actually matters.
+    public static var appStateProbe: (() -> String)?
+
     public static var lastConnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastConnectAt }
-    /// Wall-clock of the most recent didDisconnectPeripheral.
     public static var lastDisconnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastDisconnectAt }
-    /// Connects since the last `reset()` — a ladder that sees several is watching the link flap.
     public static var connectCount: Int { lock.lock(); defer { lock.unlock() }; return _connectCount }
 
-    /// Called from BluetoothManager's central-manager delegate (managerQueue).
-    public static func noteConnect() {
-        lock.lock(); _lastConnectAt = Date(); _connectCount += 1; lock.unlock()
-    }
-    public static func noteDisconnect() {
-        lock.lock(); _lastDisconnectAt = Date(); lock.unlock()
+    private static func stateTag() -> String { appStateProbe?() ?? "?" }
+
+    /// CoreBluetooth's own account of why a link ended. THIS is the field that separates
+    /// "the pod dropped us" from "something else took the connection" from "we never had it":
+    ///   CBError.peripheralDisconnected (6)     — the peer terminated
+    ///   CBError.connectionTimeout (6/…)        — link supervision timeout, i.e. out of range
+    ///   CBError.connectionFailed               — never established
+    ///   nil                                    — WE cancelled it (our own code)
+    /// A nil reason on a drop we did not initiate is itself a finding.
+    private static func describe(_ error: Error?) -> String {
+        guard let error = error else { return "reason=nil(local-cancel?)" }
+        let ns = error as NSError
+        return "reason=\(ns.domain)#\(ns.code)"
     }
 
-    /// Called at the start of a takeover so the ladder's numbers describe THIS attempt.
+    public static func noteConnect() {
+        lock.lock()
+        _lastConnectAt = Date(); _connectCount += 1
+        _reasons.append("+\(_connectCount)@\(stateTag())")
+        if _reasons.count > 12 { _reasons.removeFirst() }
+        lock.unlock()
+    }
+
+    public static func noteDisconnect(error: Error? = nil) {
+        let d = describe(error), st = stateTag()
+        lock.lock()
+        _lastDisconnectAt = Date(); _lastReason = d
+        _reasons.append("-\(d)@\(st)")
+        if _reasons.count > 12 { _reasons.removeFirst() }
+        lock.unlock()
+    }
+
+    public static func noteFailToConnect(error: Error? = nil) {
+        let d = describe(error), st = stateTag()
+        lock.lock()
+        _lastReason = d
+        _reasons.append("x\(d)@\(st)")
+        if _reasons.count > 12 { _reasons.removeFirst() }
+        lock.unlock()
+    }
+
     public static func reset() {
-        lock.lock(); _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0; lock.unlock()
+        lock.lock()
+        _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
+        _lastReason = nil; _reasons = []
+        lock.unlock()
     }
 
     /// Compact summary for a takeover/reclaim log line, relative to the attempt's start.
+    /// The trail is the whole point: "+1@active -reason=CBErrorDomain#6@inactive +2@inactive …"
+    /// reads the flap sequence, its reasons, and the execution state at each edge, in one field.
     public static func summary(since start: Date?) -> String {
         lock.lock()
         let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
+        let r = _lastReason, trail = _reasons
         lock.unlock()
         guard let start = start else { return "cb: (no anchor)" }
         func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
-        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))"
+        let why = r.map { " · \($0)" } ?? ""
+        let tr = trail.isEmpty ? "" : " · trail[\(trail.joined(separator: " "))]"
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(why)\(tr)"
     }
 }

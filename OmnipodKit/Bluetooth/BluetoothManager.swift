@@ -581,7 +581,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
-        PodLoanConnectClock.noteDisconnect()   // PODLOAN #86 — see noteConnect above
+        PodLoanConnectClock.noteDisconnect(error: error)   // PODLOAN #86 — see noteConnect above
 
         // Proxy disconnection events to peripheral manager
         for device in devices where device.manager.peripheral.identifier == peripheral.identifier {
@@ -598,6 +598,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+
+        PodLoanConnectClock.noteFailToConnect(error: error)   // PODLOAN #86
 
         log.error("%{public}@: %{public}@", #function, String(describing: error))
 
