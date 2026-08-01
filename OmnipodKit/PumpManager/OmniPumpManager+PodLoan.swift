@@ -423,3 +423,54 @@ extension UnfinalizedDose {
         return true
     }
 }
+
+// MARK: - PODLOAN #86: an independent clock for BLE connect/disconnect
+
+/// The takeover ladder polls `podLoanConnectionStateDescription` from a timer it schedules
+/// itself. On 2026-07-31 that turned out to be unfalsifiable as a diagnostic: watchOS defers a
+/// non-frontmost app's timers — measured stretching an `asyncAfter(3s)` to 8, 60, 9, 51 and 39
+/// seconds — so a read at +68 s reporting "connecting" could mean either the connection was
+/// still forming, or that it completed at +10 s and nobody looked until the timer finally fired.
+/// Those two have OPPOSITE fixes (make the ladder event-driven vs. hold a keepalive across the
+/// connect), and the log could not tell them apart because the instrument and the suspect shared
+/// a clock.
+///
+/// So stamp the CoreBluetooth callbacks themselves. `didConnect` fires from the BLE stack, not
+/// from our polling, which makes "connected at +12 s, first observed at +68 s" distinguishable
+/// from "connected at +200 s". Pure observation: nothing here influences connection behaviour.
+public enum PodLoanConnectClock {
+    private static let lock = NSLock()
+    private static var _lastConnectAt: Date?
+    private static var _lastDisconnectAt: Date?
+    private static var _connectCount = 0
+
+    /// Wall-clock of the most recent CBCentralManager didConnect for a pod peripheral.
+    public static var lastConnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastConnectAt }
+    /// Wall-clock of the most recent didDisconnectPeripheral.
+    public static var lastDisconnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastDisconnectAt }
+    /// Connects since the last `reset()` — a ladder that sees several is watching the link flap.
+    public static var connectCount: Int { lock.lock(); defer { lock.unlock() }; return _connectCount }
+
+    /// Called from BluetoothManager's central-manager delegate (managerQueue).
+    public static func noteConnect() {
+        lock.lock(); _lastConnectAt = Date(); _connectCount += 1; lock.unlock()
+    }
+    public static func noteDisconnect() {
+        lock.lock(); _lastDisconnectAt = Date(); lock.unlock()
+    }
+
+    /// Called at the start of a takeover so the ladder's numbers describe THIS attempt.
+    public static func reset() {
+        lock.lock(); _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0; lock.unlock()
+    }
+
+    /// Compact summary for a takeover/reclaim log line, relative to the attempt's start.
+    public static func summary(since start: Date?) -> String {
+        lock.lock()
+        let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
+        lock.unlock()
+        guard let start = start else { return "cb: (no anchor)" }
+        func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))"
+    }
+}

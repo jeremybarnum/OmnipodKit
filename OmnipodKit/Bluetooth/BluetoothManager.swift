@@ -560,6 +560,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        // PODLOAN #86: stamp the callback itself. The takeover ladder polls peripheral.state from
+        // a timer watchOS defers by tens of seconds when the app is not frontmost, so a poll can
+        // never say WHEN the link came up — only when we next got around to looking. Observation
+        // only; changes nothing about connection behaviour.
+        PodLoanConnectClock.noteConnect()
+
         log.debug("%{public}@: %{public}@", #function, peripheral)
         
         // Proxy connection events to peripheral manager
@@ -574,6 +580,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+
+        PodLoanConnectClock.noteDisconnect()   // PODLOAN #86 — see noteConnect above
 
         // Proxy disconnection events to peripheral manager
         for device in devices where device.manager.peripheral.identifier == peripheral.identifier {
