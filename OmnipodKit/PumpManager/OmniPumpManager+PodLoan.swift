@@ -423,3 +423,111 @@ extension UnfinalizedDose {
         return true
     }
 }
+// MARK: - PODLOAN #86: an independent clock for BLE connect/disconnect
+
+/// The takeover ladder polls `podLoanConnectionStateDescription` from a timer it schedules
+/// itself. On 2026-07-31 that turned out to be unfalsifiable as a diagnostic: watchOS defers a
+/// non-frontmost app's timers — measured stretching an `asyncAfter(3s)` to 8, 60, 9, 51 and 39
+/// seconds — so a read at +68 s reporting "connecting" could mean either the connection was
+/// still forming, or that it completed at +10 s and nobody looked until the timer finally fired.
+/// Those two have OPPOSITE fixes (make the ladder event-driven vs. hold a keepalive across the
+/// connect), and the log could not tell them apart because the instrument and the suspect shared
+/// a clock.
+///
+/// So stamp the CoreBluetooth callbacks themselves. `didConnect` fires from the BLE stack, not
+/// from our polling, which makes "connected at +12 s, first observed at +68 s" distinguishable
+/// from "connected at +200 s". Pure observation: nothing here influences connection behaviour.
+public enum PodLoanConnectClock {
+    private static let lock = NSLock()
+    private static var _lastConnectAt: Date?
+    private static var _lastDisconnectAt: Date?
+    private static var _connectCount = 0
+    private static var _lastReason: String?
+    private static var _reasons: [String] = []
+    private static var _lastCensus: String?
+    /// #86: kept SEPARATE from _lastReason. In a retry storm didFailToConnect fires >=4x/sec and
+    /// both overwrote one field + flooded the 12-slot trail, evicting the one datum that says why
+    /// an ESTABLISHED link died (observed 2026-08-01: epoch 111's trail was 12x "x#11" and the
+    /// disconnect reasons were unrecoverable). Disconnects are rare; failures are the flood.
+    private static var _lastDisconnectReason: String?
+
+    /// Set by the app so every BLE event can record what execution state we were in when it
+    /// fired. #86: the flapping and the polling deferral were BOTH only ever observed overnight,
+    /// wrist-down. Sport Mode is the opposite regime — awake, moving, wrist live — and watchOS
+    /// schedules a moving workout app differently. Without this stamp we cannot tell whether a
+    /// drop belongs to the regime that actually matters.
+    public static var appStateProbe: (() -> String)?
+
+    public static var lastConnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastConnectAt }
+    public static var lastDisconnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastDisconnectAt }
+    public static var connectCount: Int { lock.lock(); defer { lock.unlock() }; return _connectCount }
+
+    private static func stateTag() -> String { appStateProbe?() ?? "?" }
+
+    /// CoreBluetooth's own account of why a link ended. THIS is the field that separates
+    /// "the pod dropped us" from "something else took the connection" from "we never had it":
+    ///   CBError.peripheralDisconnected (6)     — the peer terminated
+    ///   CBError.connectionTimeout (6/…)        — link supervision timeout, i.e. out of range
+    ///   CBError.connectionFailed               — never established
+    ///   nil                                    — WE cancelled it (our own code)
+    /// A nil reason on a drop we did not initiate is itself a finding.
+    private static func describe(_ error: Error?) -> String {
+        guard let error = error else { return "reason=nil(local-cancel?)" }
+        let ns = error as NSError
+        return "reason=\(ns.domain)#\(ns.code)"
+    }
+
+    public static func noteConnect() {
+        lock.lock()
+        _lastConnectAt = Date(); _connectCount += 1
+        _reasons.append("+\(_connectCount)@\(stateTag())")
+        if _reasons.count > 12 { _reasons.removeFirst() }
+        lock.unlock()
+    }
+
+    public static func noteDisconnect(error: Error? = nil) {
+        let d = describe(error), st = stateTag()
+        lock.lock()
+        _lastDisconnectAt = Date(); _lastDisconnectReason = d
+        _reasons.append("-\(d)@\(st)")
+        if _reasons.count > 12 { _reasons.removeFirst() }
+        lock.unlock()
+    }
+
+    /// `census` is the caller's snapshot of what THIS process holds (see
+    /// BluetoothManager.peripheralCensus). Only recorded on failures — it is the field that
+    /// separates our own retry storm from slots consumed elsewhere on the device.
+    public static func noteFailToConnect(error: Error? = nil, census: String? = nil) {
+        let d = describe(error), st = stateTag()
+        lock.lock()
+        _lastReason = d
+        _lastCensus = census ?? _lastCensus
+        _reasons.append("x\(d)@\(st)")
+        if _reasons.count > 12 { _reasons.removeFirst() }
+        lock.unlock()
+    }
+
+    public static func reset() {
+        lock.lock()
+        _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
+        _lastReason = nil; _reasons = []; _lastCensus = nil; _lastDisconnectReason = nil
+        lock.unlock()
+    }
+
+    /// Compact summary for a takeover/reclaim log line, relative to the attempt's start.
+    /// The trail is the whole point: "+1@active -reason=CBErrorDomain#6@inactive +2@inactive …"
+    /// reads the flap sequence, its reasons, and the execution state at each edge, in one field.
+    public static func summary(since start: Date?) -> String {
+        lock.lock()
+        let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
+        let r = _lastReason, trail = _reasons, cen = _lastCensus, dr = _lastDisconnectReason
+        lock.unlock()
+        guard let start = start else { return "cb: (no anchor)" }
+        func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
+        let why = r.map { " · lastFail=\($0)" } ?? ""
+        let dwhy = dr.map { " · lastDrop=\($0)" } ?? ""
+        let tr = trail.isEmpty ? "" : " · trail[\(trail.joined(separator: " "))]"
+        let cz = cen.map { " · held[\($0)]" } ?? ""
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(dwhy)\(why)\(cz)\(tr)"
+    }
+}
