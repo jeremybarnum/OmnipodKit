@@ -446,6 +446,11 @@ public enum PodLoanConnectClock {
     private static var _lastReason: String?
     private static var _reasons: [String] = []
     private static var _lastCensus: String?
+    /// #86: kept SEPARATE from _lastReason. In a retry storm didFailToConnect fires >=4x/sec and
+    /// both overwrote one field + flooded the 12-slot trail, evicting the one datum that says why
+    /// an ESTABLISHED link died (observed 2026-08-01: epoch 111's trail was 12x "x#11" and the
+    /// disconnect reasons were unrecoverable). Disconnects are rare; failures are the flood.
+    private static var _lastDisconnectReason: String?
 
     /// Set by the app so every BLE event can record what execution state we were in when it
     /// fired. #86: the flapping and the polling deferral were BOTH only ever observed overnight,
@@ -484,7 +489,7 @@ public enum PodLoanConnectClock {
     public static func noteDisconnect(error: Error? = nil) {
         let d = describe(error), st = stateTag()
         lock.lock()
-        _lastDisconnectAt = Date(); _lastReason = d
+        _lastDisconnectAt = Date(); _lastDisconnectReason = d
         _reasons.append("-\(d)@\(st)")
         if _reasons.count > 12 { _reasons.removeFirst() }
         lock.unlock()
@@ -506,7 +511,7 @@ public enum PodLoanConnectClock {
     public static func reset() {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
-        _lastReason = nil; _reasons = []; _lastCensus = nil
+        _lastReason = nil; _reasons = []; _lastCensus = nil; _lastDisconnectReason = nil
         lock.unlock()
     }
 
@@ -516,13 +521,14 @@ public enum PodLoanConnectClock {
     public static func summary(since start: Date?) -> String {
         lock.lock()
         let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
-        let r = _lastReason, trail = _reasons, cen = _lastCensus
+        let r = _lastReason, trail = _reasons, cen = _lastCensus, dr = _lastDisconnectReason
         lock.unlock()
         guard let start = start else { return "cb: (no anchor)" }
         func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
-        let why = r.map { " · \($0)" } ?? ""
+        let why = r.map { " · lastFail=\($0)" } ?? ""
+        let dwhy = dr.map { " · lastDrop=\($0)" } ?? ""
         let tr = trail.isEmpty ? "" : " · trail[\(trail.joined(separator: " "))]"
         let cz = cen.map { " · held[\($0)]" } ?? ""
-        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(why)\(cz)\(tr)"
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(dwhy)\(why)\(cz)\(tr)"
     }
 }
