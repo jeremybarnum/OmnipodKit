@@ -139,6 +139,14 @@ extension PeripheralManager {
                 self.log.error("Configured peripheral has no services. Reconfiguring %{public}@", self.peripheral)
             }
 
+            // #86 (2026-08-03): say which branch ran. Without this the whole BLE layer is dark
+            // in the field log, and "the pod hung up" cannot be told apart from "we never spoke".
+            // The distinction decides the fix: silence means the session guard bailed (stale
+            // cross-queue peripheral.state); a completed handshake followed by a drop means the
+            // protocol or keys. Three review rounds could not settle that from the logs alone.
+            self.log.error("[CONFIG] running configure branch: needsConfiguration=%{public}@ servicesNil=%{public}@",
+                           String(describing: self.needsConfiguration),
+                           String(describing: self.peripheral.services == nil))
             if self.needsConfiguration || self.peripheral.services == nil {
                 do {
                     self.log.bleDebug("Applying configuration")
@@ -148,6 +156,7 @@ extension PeripheralManager {
                     if let delegate = self.delegate {
                         try delegate.completeConfiguration(for: self)
                         self.log.bleDebug("Delegate configuration notified")
+                        self.log.error("[CONFIG] completeConfiguration RETURNED cleanly")
                     }
 
                     self.log.bleDebug("Peripheral configuration completed")

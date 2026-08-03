@@ -3183,6 +3183,11 @@ extension OmniPumpManager: PodCommsDelegate {
     // Not used for Eros pods
     func podCommsDidEstablishSession(_ podComms: PodComms) {
 
+        // #86 (2026-08-03): republish to the PODLOAN seam BEFORE the setup-complete guard —
+        // a watch takeover is by definition a pod that is already set up, and the watch needs
+        // to know the session is live regardless of what post-connect processing follows.
+        PodLoanConnectClock.podLoanOnSessionEstablished?()
+
         guard podComms.podState?.isSetupComplete == true else {
             self.log.debug("### Skipping post-connect processing with incomplete setup")
             return

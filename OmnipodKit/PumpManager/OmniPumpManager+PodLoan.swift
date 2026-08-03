@@ -457,6 +457,24 @@ public enum PodLoanConnectClock {
     /// wrist-down. Sport Mode is the opposite regime — awake, moving, wrist live — and watchOS
     /// schedules a moving workout app differently. Without this stamp we cannot tell whether a
     /// drop belongs to the regime that actually matters.
+    /// #86 (2026-08-03): the pod BLE stack's own "encrypted session is live" event, republished
+    /// for the watch takeover. THE point of this hook is that it fires from
+    /// BlePodComms.completeConfiguration AFTER sendHello / enableNotifications /
+    /// establishNewSession have all succeeded — i.e. it is the stack telling us the link is
+    /// genuinely usable, rather than us inferring it from CBPeripheral.state.
+    ///
+    /// Why that matters: the takeover ladder polled peripheral.state from the loan controller's
+    /// queue, but CBPeripheral state is only valid on the central's queue. Field 2026-08-03
+    /// epoch 143, with the app running perfectly (max inter-read gap 3.3 s), every read
+    /// contradicted the connect callbacks — read 4 said "disconnected" 0.3 s after didConnect,
+    /// read 9 said "connecting" 0.5 s after didConnect. The session guard bailed on that stale
+    /// value, so nothing was ever sent, and the pod hung up on the silent link after its idle
+    /// timeout — seven connections, each 3.5-3.6 s, metronomic.
+    ///
+    /// The pre-stock build never hit this because it never polled: it parked the takeover
+    /// completion and finished on exactly this callback. This restores that contract.
+    public static var podLoanOnSessionEstablished: (() -> Void)?
+
     public static var appStateProbe: (() -> String)?
 
     public static var lastConnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastConnectAt }
