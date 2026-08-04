@@ -867,6 +867,13 @@ extension BlePodComms: PeripheralManagerDelegate {
                 needsSessionEstablishment = false
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
+                // #86 (2026-08-03): this catch is why the handshake failure has been invisible
+                // for three days — it swallows the error and returns normally, so callers cannot
+                // tell a failed session from a successful one. Identical in the pre-stock build,
+                // so this is inherited upstream behaviour rather than a port regression. Surface
+                // it: sendHello / enableNotifications / establishNewSession each fail differently
+                // and only one of them is a crypto/counter problem.
+                PodLoanConnectClock.podLoanLog("[CONFIG] session handshake FAILED: \(error)")
                 log.error("Pod session sync error: %{public}@", String(describing: error))
             }
 
