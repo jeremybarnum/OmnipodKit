@@ -180,6 +180,13 @@ extension PeripheralManager {
 
                     self.log.bleDebug("Peripheral configuration completed")
                 } catch let error {
+                    // #86 (2026-08-03): name the failure. The [CONFIG] evidence from build 215
+                    // showed the configure branch RUNNING eight times and "RETURNED cleanly" only
+                    // once — and since completeConfiguration swallows its own error and returns
+                    // normally, the other seven must have thrown HERE, in applyConfiguration
+                    // (service/characteristic discovery), not in the session handshake. Which of
+                    // the two it is changes the fix entirely, so stop inferring it.
+                    PodLoanConnectClock.podLoanLog("[CONFIG] configure FAILED (applyConfiguration or delegate threw): \(error)")
                     self.log.error("Error applying peripheral configuration: %{public}@", String(describing: error))
                     // Will retry
                 }
