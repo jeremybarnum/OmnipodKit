@@ -474,6 +474,20 @@ public enum PodLoanConnectClock {
     /// completion and finished on exactly this callback. This restores that contract.
     public static var podLoanOnSessionEstablished: (() -> Void)?
 
+    /// #86 (2026-08-03): a sink so the BLE layer can reach the WATCH's mirrored log.
+    ///
+    /// OmnipodKit logs via os_log, which goes to the system log and is invisible in the
+    /// g7watch file log the field analysis actually reads. A [CONFIG] diagnostic added on
+    /// 2026-08-03 to settle "did we ever talk to the pod" produced ZERO lines in the field for
+    /// exactly that reason — the instrument meant to end the ambiguity could not be seen.
+    /// The watch installs this at startup; the phone leaves it nil and keeps os_log only.
+    public static var podLoanLogSink: ((String) -> Void)?
+
+    /// Emit to BOTH os_log (via the caller) and the watch's mirrored log, if wired.
+    public static func podLoanLog(_ line: String) {
+        podLoanLogSink?(line)
+    }
+
     public static var appStateProbe: (() -> String)?
 
     public static var lastConnectAt: Date? { lock.lock(); defer { lock.unlock() }; return _lastConnectAt }
