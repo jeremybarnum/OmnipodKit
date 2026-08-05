@@ -108,9 +108,13 @@ class BlePodComms: PodComms {
         // waits on a link nobody is holding. Log which way it went.
         if let bleIdentifier = podState?.bleIdentifier {
             log.default("PODLOAN: releaseConnection -> disconnect %{public}@", bleIdentifier)
+            // os_log alone is invisible in the g7watch file the field analysis reads — which is
+            // why build 228's proof-of-fire produced zero lines. Route it through the sink too.
+            PodLoanConnectClock.podLoanLog("PODLOAN: releaseConnection -> disconnect \(bleIdentifier)")
             bluetoothManager.disconnectFromDevice(uuidString: bleIdentifier)
         } else {
             log.error("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
+            PodLoanConnectClock.podLoanLog("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
         }
 #if os(watchOS)
         // PODLOAN E4 (157): a reclaim escalation may have armed the takeover-grade scan;
