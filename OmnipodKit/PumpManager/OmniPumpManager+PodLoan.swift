@@ -228,6 +228,22 @@ extension OmniPumpManager {
         return state.podConnectionReleased
     }
 
+    /// True when a MANUAL bolus will make the POD beep — acknowledgement when it accepts the
+    /// command, completion when delivery ends (OmniPumpManager :2552-2558; completionBeep is
+    /// manual-only, so automatic loop doses beep once, not twice).
+    ///
+    /// The watch's success haptic fires on enactBolus's completion, which is the SAME instant
+    /// as the acknowledgement beep and carries the same information. Jeremy, 2026-08-05: "let's
+    /// eliminate these silent haptic bolus confirmations that overlap with beeps." Conditional
+    /// rather than deleted, because beeps are still suppressed in the sport build (re-enabling
+    /// them for Caitlin is on the pre-production list) — deleting outright would leave a bolus
+    /// confirming with nothing at all until that flips. The watch inherits these settings from
+    /// the phone in the grant's pumpManagerRawState, so this tracks the phone automatically.
+    public var podLoanBeepsOnManualBolus: Bool {
+        guard !silencePod else { return false }
+        return beepPreference.shouldBeepForCommand(automatic: false)
+    }
+
     /// True once the reclaimed connection is truly back — the pod peripheral is connected.
     /// `reclaimConnection()` only re-arms the bid (rearmConnection); the actual BLE reconnect
     /// lands seconds-to-minutes later, so post-hand-back UI keeps "Reclaiming…" up until this
