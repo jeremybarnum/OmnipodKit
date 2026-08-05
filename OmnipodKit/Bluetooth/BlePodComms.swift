@@ -101,8 +101,15 @@ class BlePodComms: PodComms {
     // second controller (the watch) holds it uncontested. Pod state, pairing and
     // keys untouched. Reverse: rearmConnection().
     func releaseConnection() {
+        // Proof-of-fire: a release that finds no bleIdentifier is a SILENT no-op. That is
+        // tolerable for E4 (the next cycle retries) but not for hand-back teardown, where it
+        // strands the pod CONNECTED to a central that is about to be dropped — the phone then
+        // waits on a link nobody is holding. Log which way it went.
         if let bleIdentifier = podState?.bleIdentifier {
+            log.default("PODLOAN: releaseConnection -> disconnect %{public}@", bleIdentifier)
             bluetoothManager.disconnectFromDevice(uuidString: bleIdentifier)
+        } else {
+            log.error("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
         }
         // PODLOAN E4 (157): a reclaim escalation may have armed the takeover-grade scan;
         // releasing the pod ends the bid entirely, so the scan must not outlive it and
