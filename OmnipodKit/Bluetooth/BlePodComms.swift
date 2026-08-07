@@ -821,11 +821,31 @@ extension BlePodComms: PeripheralManagerDelegate {
                 podStateLock.unlock()
             }
 
+            // #86 max-instrumentation pass (2026-08-07): the ORIGINAL [CONFIG] line only ever
+            // fired on FAILURE, with the three throwing calls collapsed into one catch — so a
+            // handshake that took 6 slow seconds but eventually succeeded looked identical in the
+            // log to one that took 60ms. That distinction is exactly what separates "the crypto/
+            // counter exchange is the slow part" from "the connect itself was the slow part" —
+            // the ladder's own reads cannot see inside completeConfiguration at all. Stamp each
+            // step on BOTH paths now.
+            let handshakeStart = Date()
+            var stepTimes: [String] = []
+            func mark(_ step: String, since last: Date) -> Date {
+                let now = Date()
+                stepTimes.append("\(step) \(String(format: "%.2f", now.timeIntervalSince(last)))s")
+                return now
+            }
             do {
+                var t = handshakeStart
                 try manager.sendHello(myId: myId)
+                t = mark("sendHello", since: t)
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
+                t = mark("enableNotifications", since: t)
                 try establishNewSession()
+                t = mark("establishNewSession", since: t)
                 needsSessionEstablishment = false
+                PodLoanConnectClock.podLoanLog(String(format: "[CONFIG] handshake OK in %.2fs — %@",
+                                                        t.timeIntervalSince(handshakeStart), stepTimes.joined(separator: ", ")))
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
                 // #86 (2026-08-03): this catch is why the handshake failure has been invisible
@@ -833,8 +853,11 @@ extension BlePodComms: PeripheralManagerDelegate {
                 // tell a failed session from a successful one. Identical in the pre-stock build,
                 // so this is inherited upstream behaviour rather than a port regression. Surface
                 // it: sendHello / enableNotifications / establishNewSession each fail differently
-                // and only one of them is a crypto/counter problem.
-                PodLoanConnectClock.podLoanLog("[CONFIG] session handshake FAILED: \(error)")
+                // and only one of them is a crypto/counter problem. #86 (2026-08-07): stepTimes now
+                // shows which of the three completed before the failing one, and how long each took.
+                let completed = stepTimes.isEmpty ? "none of the three steps completed" : stepTimes.joined(separator: ", ")
+                PodLoanConnectClock.podLoanLog(String(format: "[CONFIG] session handshake FAILED after %.2fs (%@): %@",
+                                                        Date().timeIntervalSince(handshakeStart), completed, "\(error)"))
                 log.error("Pod session sync error: %{public}@", String(describing: error))
             }
 

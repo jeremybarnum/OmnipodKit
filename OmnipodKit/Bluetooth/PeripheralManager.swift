@@ -526,6 +526,10 @@ extension PeripheralManager: CBPeripheralDelegate {
             return
         }
         self.log.default("didReadRSSI: %{public}@", String(describing: RSSI))
+        // #86 max-instrumentation pass (2026-08-07): once per connect, and the only direct signal-
+        // strength number on the whole takeover path — os_log-only until now, so a bad link never
+        // showed up as anything but "connect happened" or "connect didn't happen".
+        PodLoanConnectClock.podLoanLog("[BLE] connect RSSI \(RSSI)")
     }
 
     func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {

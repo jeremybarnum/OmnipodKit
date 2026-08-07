@@ -405,11 +405,16 @@ class BluetoothManager: NSObject {
             serviceUUID = podType.blePodProfile.advertisementServiceUUID
         }
         log.default("Start scanning for %{public}@", serviceUUID.uuidString)
+        // #86 max-instrumentation pass (2026-08-07): scan start/stop was os_log-only, so a slow
+        // takeover could never say WHETHER a scan was even running, only that reads kept failing.
+        // Route it to the field-visible sink like the [CONFIG] lines already do.
+        PodLoanConnectClock.podLoanLog("[SCAN] start — service \(serviceUUID.uuidString) · reason \(loanTakeoverPodId != nil ? "takeover(0x\(String(loanTakeoverPodId!, radix: 16)))" : (discoveryModeEnabled ? "discovery" : "auto-connect"))")
         manager.scanForPeripherals(withServices: [serviceUUID], options: nil)
     }
 
     private func stopScanning() {
         log.default("Stop scanning")
+        PodLoanConnectClock.podLoanLog("[SCAN] stop")
         manager.stopScan()
     }
 
@@ -522,6 +527,20 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
             addPeripheral(peripheral, podAdvertisement: podAdvertisement)
+
+            // #86 max-instrumentation pass (2026-08-07): the single most missing fact in every
+            // slow-takeover trace was WHETHER the pod ever advertised at all. Every prior signal
+            // (BLE state polls, PodLoanConnectClock's connect/disconnect stamps) only starts once
+            // a connect is attempted — a pod that never advertises never reaches any of them, so
+            // the ladder's 14 backstop-driven reads looked identical to "the pod isn't here" and
+            // "the pod is here but the handshake is slow". Gated to an armed takeover so this
+            // doesn't run hot during ordinary steady-state scanning.
+            if let armedTarget = loanTakeoverPodId {
+                let seenId = podAdvertisement.podId.map { "0x" + String($0, radix: 16) } ?? "(none)"
+                let matched = podAdvertisement.podId == armedTarget
+                PodLoanConnectClock.podLoanLog(
+                    "[SCAN] ad seen: pod \(seenId) rssi \(RSSI) — \(matched ? "MATCHES" : "target is") takeover target 0x\(String(armedTarget, radix: 16))")
+            }
 
             // PODLOAN: adopt an already-paired pod by its advertised ADDRESS (the phone's
             // per-device peripheral UUID is useless here). Match, record THIS device's
