@@ -646,7 +646,23 @@ extension BluetoothManager: CBCentralManagerDelegate {
         connectionDelegate?.omnipodPeripheralDidFailToConnect(peripheral: peripheral, error: error)
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
-            central.connect(peripheral, options: nil)
+            // #94 (2026-08-07): NEVER re-connect instantly. CBErrorDomain Code=11
+            // (connectionLimitReached) fails in MICROSECONDS — no slot is going to appear between
+            // this callback and an immediate retry — so the old instant reconnect span a tight
+            // loop at ~2,000 iterations/second (field: 1051 identical log lines in 0.52s at
+            // 16:09:26; 688 in 0.38s at 14:24:42). Each iteration logged through NSLog + the
+            // watch's mirrored file log, jamming syslogd and the log-append queue hard enough to
+            // starve the MAIN thread (the 15:50:12 stall breadcrumb froze inside glance.refresh,
+            // whose logRender NSLog blocked behind the storm) — the reproducible glance freeze,
+            // followed by the watchdog kill, was THIS loop's collateral. A 2s backoff preserves
+            // the auto-reconnect contract (the pod is re-acquired as soon as a slot frees) while
+            // making the failure path ~4,000x cooler. Applied to ALL failure codes, not just 11:
+            // no failure mode is answered better by an instant identical retry.
+            managerQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self = self, self.autoConnectIDs.contains(peripheral.identifier.uuidString),
+                      peripheral.state == .disconnected else { return }
+                central.connect(peripheral, options: nil)
+            }
         }
     }
 }
