@@ -181,6 +181,33 @@ extension OmniPumpManager {
     /// serves a takeover-proof or a verdict chase). Completion: true when a status
     /// round-trip succeeded.
     public func podLoanReadStatus(completion: @escaping (Bool) -> Void) {
+        #if targetEnvironment(simulator)
+        // SIM LOAN HARNESS (#61, 2026-08-07). The simulator has no radio, so a real status
+        // round-trip can never complete and every loan died at the takeover ladder — which made
+        // the entire loan lifecycle (glance during a loan, carb flow during a loan, hand-back)
+        // untestable off-wrist. Three of 2026-08-07's field failures lived exactly there.
+        //
+        // This is the ONE seam a simulated takeover needs: complete the read after a plausible
+        // connect latency, and stamp the odometer measurement the ACTIVE transition requires
+        // (`podLoanInsulinDelivered` must be non-nil — the granted mock pod has never had a real
+        // status read, so it arrives nil). Everything else — grant intake, seeds, phase machine,
+        // glance, dosing books — runs the REAL code. Same pattern as upstream's jumpStartPod:
+        // fabricate the radio's answer, never the bookkeeping.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            guard let self = self else { return completion(false) }
+            self.setState { state in
+                if state.podState?.lastInsulinMeasurements == nil {
+                    let delivered = state.podState?.setupUnitsDelivered ?? Pod.primeUnits
+                    state.podState?.lastInsulinMeasurements = PodInsulinMeasurements(
+                        insulinDelivered: delivered,
+                        reservoirLevel: nil,
+                        validTime: Date())
+                }
+            }
+            self.log.default("SIM LOAN: podLoanReadStatus simulated OK (no radio in the simulator)")
+            completion(true)
+        }
+        #else
         getPodStatus(canOptimize: false) { result in
             if case .success(let status) = result, status != nil {
                 completion(true)
@@ -188,6 +215,7 @@ extension OmniPumpManager {
                 completion(false)
             }
         }
+        #endif
     }
 
     /// Chases the verdict on the pending command NOW: one forced status read, then the
