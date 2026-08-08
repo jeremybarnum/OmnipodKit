@@ -277,7 +277,15 @@ extension OmniPumpManager {
     /// lands seconds-to-minutes later, so post-hand-back UI keeps "Reclaiming…" up until this
     /// turns true (distinct from `isConnectionReleased`, the loan flag, which clears at reclaim).
     public var isConnectionReady: Bool {
+        #if targetEnvironment(simulator)
+        // SIM LOAN HARNESS (#61): no radio -> no peripheral ever reaches .connected, which
+        // starves the phone's reclaim verification (PodLoanPhoneController gates the verifying
+        // status read on this) and pins every post-loan settle window at its 5-minute ceiling.
+        // A jump-started sim pod is by definition "home", so say so.
+        return state.podState != nil
+        #else
         return podLoanConnectionStateDescription == "connected"
+        #endif
     }
 
     /// The pod peripheral's ACTUAL CoreBluetooth state, for diagnosing reclaim failures.
