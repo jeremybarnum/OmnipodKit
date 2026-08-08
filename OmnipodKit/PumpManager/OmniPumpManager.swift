@@ -2513,6 +2513,23 @@ extension OmniPumpManager: PumpManager {
     }
 
     public func ensureCurrentPumpData(completion: ((Date?) -> Void)?) {
+        #if targetEnvironment(simulator)
+        // SIM LOAN HARNESS (#61): a real status fetch needs the radio, so in the simulator every
+        // "pump data too old" fetch failed forever — the phone's own loop errored every cycle
+        // (pumpDataTooOld) and the loan reclaim verification (which requires lastSync to ADVANCE
+        // past the reclaim start) could never succeed. Fake the successful round-trip the same
+        // way the takeover seam does: stamp a fresh odometer measurement and report now.
+        if state.podState != nil {
+            setState { state in
+                let delivered = state.podState?.lastInsulinMeasurements?.delivered
+                    ?? state.podState?.setupUnitsDelivered ?? Pod.primeUnits
+                state.podState?.lastInsulinMeasurements = PodInsulinMeasurements(
+                    insulinDelivered: delivered, reservoirLevel: nil, validTime: Date())
+            }
+            completion?(Date())
+            return
+        }
+        #endif
         let shouldFetchStatus = setStateWithResult { (state) -> Bool? in
             guard state.hasActivePod else {
                 return nil // No active pod
