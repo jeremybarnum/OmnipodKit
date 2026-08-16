@@ -845,10 +845,21 @@ class BluetoothManager: NSObject {
             // A takeover already has its own budget (14 reads / ~112s) and its own correctly-filtered
             // continuous scan. Let that scan run; a discovery will drive the connect through
             // didDiscover exactly as it does in the steady state.
-            if self.loanTakeoverPodId != nil, self.manager.isScanning {
+            // NOT gated on isScanning — that was the bug in the first version of this guard. The
+            // 4s fallback below calls stopScan() before its cold connect, so by the NEXT call
+            // isScanning is false, the guard missed, and the teardown loop resumed: measured at
+            // 265.2s / 11 reads with a scan rebuilt every ~4.3s throughout. The condition only
+            // held on the first call, which is exactly when it did not matter.
+            if self.loanTakeoverPodId != nil {
                 self.pendingFreshConnectID = id
-                self.log.default("[connectOnDemand] takeover in progress — leaving the running scan up for %{public}@", id)
-                self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] takeover: keeping the existing scan (no 4s teardown)")
+                if !self.manager.isScanning {
+                    // The fallback (or a previous connect) stopped it. Re-arm through
+                    // startScanning so it comes back with the TAKEOVER filter and
+                    // allowDuplicates, rather than this method's narrower one-shot scan.
+                    self.startScanning()
+                }
+                self.log.default("[connectOnDemand] takeover in progress — continuous scan, no 4s teardown (%{public}@)", id)
+                self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] takeover: continuous scan (no 4s teardown)")
                 return
             }
             self.pendingFreshConnectID = id
