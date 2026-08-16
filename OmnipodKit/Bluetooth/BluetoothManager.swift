@@ -11,7 +11,14 @@ import CoreBluetooth
 import Foundation
 import LoopKit
 import os.log
+#if os(iOS)
 import UIKit
+#else
+// watchOS has no UIKit. WatchKit carries the equivalent app-lifecycle notifications, which this
+// file needs for foreground/background tracking — that tracking is not iOS-specific bookkeeping,
+// it decides whether the pod link is held, so it is mapped rather than compiled out.
+import WatchKit
+#endif
 
 enum BluetoothManagerError: Error {
     case bluetoothNotAvailable(CBManagerState)
@@ -325,7 +332,17 @@ class BluetoothManager: NSObject {
     /// managerQueue and cross-queue by PeripheralManager (benign bool race, like appIsForeground).
     var shouldHoldConnection: Bool {
         if isAppForeground { return true }
+#if os(iOS)
         return podType.isDash && Storage.shared.podKeepAlive.value.keepsPodConnectedInBackground
+#else
+        // watchOS: the background Pod Keep Alive modes are an iOS-only user setting — `Storage`
+        // lives in the UI layer, which the watch framework deliberately does not link. This
+        // therefore collapses to exactly `isAppForeground`, which is both the validated
+        // connect-on-demand behavior and precisely what an iPhone does with Pod Keep Alive at
+        // its `.disabled` default. A watch host that needs the link held across background
+        // holds it through its own session keep-alive, not through this setting.
+        return false
+#endif
     }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
@@ -483,7 +500,14 @@ class BluetoothManager: NSObject {
         // false) from a user-initiated open (foregrounds → everFg true). Log the transitions to the
         // persistent device log with PID for the timeline.
         let center = NotificationCenter.default
-        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+#if os(iOS)
+        let didBecomeActiveNotification = UIApplication.didBecomeActiveNotification
+        let didEnterBackgroundNotification = UIApplication.didEnterBackgroundNotification
+#else
+        let didBecomeActiveNotification = WKApplication.didBecomeActiveNotification
+        let didEnterBackgroundNotification = WKApplication.didEnterBackgroundNotification
+#endif
+        center.addObserver(forName: didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             let pid = ProcessInfo.processInfo.processIdentifier
             self?.managerQueue.async {
                 guard let self = self else { return }
@@ -493,7 +517,7 @@ class BluetoothManager: NSObject {
                 self.enterForeground()
             }
         }
-        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+        center.addObserver(forName: didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             let pid = ProcessInfo.processInfo.processIdentifier
             self?.managerQueue.async {
                 guard let self = self else { return }
