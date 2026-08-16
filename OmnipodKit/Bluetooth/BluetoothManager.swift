@@ -608,6 +608,34 @@ class BluetoothManager: NSObject {
             self.recreateCentral()
         }
     }
+#endif
+
+#if os(iOS)
+    /// PODLOAN: the same escalation for the PHONE, minus the central rebuild.
+    ///
+    /// The watchOS version above was gated "iOS never reclaims a loan", which is not true of this
+    /// design — the phone reclaims at every hand-back settle, whenever a grant is lost, and on the
+    /// escape-hatch force-reclaim. It was therefore left with only the bare pending-connect that
+    /// the comment above calls probabilistic, and it shows: a measured hand-back settle of 224.2s
+    /// (and 237.0s earlier the same evening) against ~1s when the link happened to still be up.
+    /// Four minutes of silence on the ESCAPE HATCH is the worst place for this to be slow.
+    ///
+    /// Arms the same scan-adopt, which is what actually finds an idle pod, and deliberately does
+    /// NOT call recreateCentral(): watchOS has no CoreBluetooth state restoration, so dropping its
+    /// central is free, whereas on iOS the central owns a restore identifier and rebuilding it
+    /// would discard the restoration the app depends on after a background relaunch.
+    func escalateLoanReclaim(podId: UInt32) {
+        managerQueue.async {
+            self.log.default("PODLOAN: reclaim escalation (iOS) — arming scan-adopt for pod 0x%x (central preserved)", podId)
+            self.loanTakeoverPodId = podId
+            if self.manager.state == .poweredOn, !self.manager.isScanning {
+                self.startScanning()
+            }
+        }
+    }
+#endif
+
+#if os(watchOS) || os(iOS)
 
     /// PODLOAN E4 (157): disarm an escalation scan that never found the pod. Called on
     /// release so the scan cannot outlive the reclaim ladder and contend with the G7

@@ -168,12 +168,15 @@ extension OmniPumpManager {
     /// The reclaim's bare pending-connect proved probabilistic in the field while the
     /// scan-adopt takeover landed 4/4 from arbitrary idle — when the connect hasn't
     /// settled mid-ladder, drop the central and scan for the pod by address instead.
-    /// No-op if there's no pod address. watchOS only; iOS never reclaims a loan.
+    /// No-op if there's no pod address.
+    ///
+    /// Was gated watchOS-only on the premise that "iOS never reclaims a loan". The phone reclaims
+    /// at every hand-back settle, whenever a grant is lost, and on the escape-hatch force-reclaim,
+    /// so that premise was false and the phone was left with the bare pending-connect this
+    /// escalation exists to replace — measured at 224s on a hand-back settle.
     public func podLoanEscalateReclaim() {
-        #if os(watchOS)
         guard let address = state.podState?.address else { return }
         (podComms as? BlePodComms)?.escalateLoanReclaim(podId: address)
-        #endif
     }
 
     /// A REAL status read, bypassing the freshness optimization (getPodStatus is
@@ -250,6 +253,18 @@ extension OmniPumpManager {
     }
 
     // MARK: - PumpConnectionLendable (the phone half)
+
+    /// PumpConnectionLendable: go LOOKING for the pod instead of waiting to hear it.
+    ///
+    /// The default reclaim re-arms a bare pending-connect, which the E4 work found to be
+    /// probabilistic against an idle pod (caught a 578s-idle pod, missed a 518s-idle one), while
+    /// the takeover's scan-and-adopt landed 4/4 from arbitrary state. The phone had no way to
+    /// reach that path — the escalation was gated watchOS-only — so a hand-back settle sat on the
+    /// bare connect: measured at 224.2s and 237.0s on consecutive evenings, on the escape hatch.
+    public func escalateConnectionReclaim() {
+        podLoanEscalateReclaim()
+    }
+
 
     /// True while the pod's connection is deliberately released (on loan).
     public var isConnectionReleased: Bool {
