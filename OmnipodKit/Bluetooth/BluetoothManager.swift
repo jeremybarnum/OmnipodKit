@@ -1352,12 +1352,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
                         connectionDelegate?.omnipodLogDeviceEvent("[pairing] connecting to pairable pod \(peripheral.identifier.uuidString)")
                         timedConnect(peripheral)  // pairing — an explicit connect, not auto-reconnect
                     }
-            }
-            } else if autoConnectIDs.contains(peripheral.identifier.uuidString) && peripheral.state == .disconnected {
-                log.debug("Reonnecting to autoconnect device")
-                autoReconnect(peripheral)
-            } else {
-                log.info("Ignoring paired or unconnectable peripheral: %{public}@", peripheral)
+                } else if autoConnectIDs.contains(peripheral.identifier.uuidString) && peripheral.state == .disconnected {
+                    log.debug("Reonnecting to autoconnect device")
+                    autoReconnect(peripheral)
+                } else {
+                    log.info("Ignoring paired or unconnectable peripheral: %{public}@", peripheral)
+                }
             }
         } else {
             log.info("Ignoring peripheral with unexpected advertisement data: %{public}@", advertisementData)
