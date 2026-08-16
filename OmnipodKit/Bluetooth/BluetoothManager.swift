@@ -965,14 +965,26 @@ class BluetoothManager: NSObject {
         let serviceUUID: CBUUID = podScanServiceUUID
         let services: [CBUUID]?
         let options: [String: Any]
-        if discoveryModeEnabled {
-            // Pairing: scan for the pod's main advertisement service so a new/unpaired pod is found.
+        if discoveryModeEnabled || loanTakeoverPodId != nil {
+            // Pairing OR PODLOAN takeover: scan for the pod's main advertisement service, so a pod
+            // this device holds no peripheral for is actually found.
+            //
             // MUST take precedence over the low-power alarm scan (which filters on C005/C00A and would
             // never see a pairing pod) and over scanningEnabled (pairing has to scan regardless).
+            //
+            // The TAKEOVER arm was missing, and it is the same situation as pairing: the watch
+            // inherits a pod it has never seen, so it has no CBPeripheral and discovery is mandatory.
+            // Falling through left it on the low-power fault-watch — C00A for DASH, the "…02"
+            // attention UUID for O5 — which by design only fires when a pod is FAULTED. A healthy pod
+            // never advertises it, so the takeover scan could not succeed at any distance or with any
+            // amount of patience: 14 reads, 113 s, `no-peripheral · didConnect never (n=0)`, every
+            // time. The fork's older driver had no low-power mode and always scanned the main
+            // service, which is why this only appeared after adopting the newer OmnipodKit.
+            let reason = discoveryModeEnabled ? "discovery/pairing" : "loan-takeover"
             services = [serviceUUID]
             options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
-            log.default("Start scanning (discovery/pairing filter=%{public}@)", serviceUUID.uuidString)
-            connectionDelegate?.omnipodLogDeviceEvent("[pairing] scan started (filter=\(serviceUUID.uuidString))")
+            log.default("Start scanning (%{public}@ filter=%{public}@)", reason, serviceUUID.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[\(reason)] scan started (filter=\(serviceUUID.uuidString))")
             manager.scanForPeripherals(withServices: services, options: options)
             return
         }
