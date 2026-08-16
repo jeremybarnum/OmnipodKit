@@ -832,6 +832,25 @@ class BluetoothManager: NSObject {
     func connectViaFreshDiscovery(_ peripheral: CBPeripheral) {
         managerQueue.async {
             let id = peripheral.identifier.uuidString
+            // PODLOAN: during a TAKEOVER, leave a running scan alone.
+            //
+            // This method exists for the steady state, where the pod is known and a 4s listen
+            // before a cold connect is a good trade. In a takeover it is actively harmful: the
+            // takeover read loop calls a connect every 8s, so this tears the scan down and rebuilds
+            // it every ~4.4s — measured — which (a) discards the takeover's allowDuplicates scan
+            // armed in startScanning, and (b) is aggressive enough that iOS throttles the scanning.
+            // The pod is then found only when a 4s window happens to coincide with an advertisement:
+            // two measured takeovers took 190.9s and 195.2s, both succeeding, both after 8 reads.
+            //
+            // A takeover already has its own budget (14 reads / ~112s) and its own correctly-filtered
+            // continuous scan. Let that scan run; a discovery will drive the connect through
+            // didDiscover exactly as it does in the steady state.
+            if self.loanTakeoverPodId != nil, self.manager.isScanning {
+                self.pendingFreshConnectID = id
+                self.log.default("[connectOnDemand] takeover in progress — leaving the running scan up for %{public}@", id)
+                self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] takeover: keeping the existing scan (no 4s teardown)")
+                return
+            }
             self.pendingFreshConnectID = id
             self.manager.stopScan()
             self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID], options: nil)
