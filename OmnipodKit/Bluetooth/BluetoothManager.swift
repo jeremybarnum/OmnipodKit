@@ -182,9 +182,18 @@ class BluetoothManager: NSObject {
             self.loanTakeoverPodId = podId
             if self.manager.state == .poweredOn {
                 self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
-                if !self.manager.isScanning {
-                    self.startScanning()
+                // RE-ARM, don't skip. A scan is almost always already running by now — the idle
+                // fault-watch, armed microseconds earlier when the manager came up, filtering on
+                // C00A/…02. `if !isScanning` therefore skipped this call every time and left the
+                // takeover listening for a FAULT advertisement a healthy pod never sends, which is
+                // the whole reason a takeover could never find its pod. The filter has to be
+                // replaced, so stop the old scan first: scanForPeripherals does not merge filters,
+                // and a running scan is not restarted by calling it again.
+                if self.manager.isScanning {
+                    self.log.default("PODLOAN: stopping the idle scan to re-arm with the takeover filter")
+                    self.manager.stopScan()
                 }
+                self.startScanning()
             } else {
                 // The common case: takeover arms milliseconds after the central is
                 // created, before it reaches poweredOn. centralManagerDidUpdateState
