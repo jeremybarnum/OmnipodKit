@@ -99,7 +99,7 @@ class PodCommsSessionTests: XCTestCase, PodCommsSessionDelegate {
     // MARK: - PODLOAN #72: re-arming the C5-cancelled inherited running temp
 
     private func makeRunningTemp(rate: Double = 2.0, startedMinutesAgo: TimeInterval = 10, durationMinutes: TimeInterval = 30) -> UnfinalizedDose {
-        return UnfinalizedDose(tempBasalRate: rate,
+        return UnfinalizedDose(decisionId: nil, tempBasalRate: rate,
                                startTime: Date().addingTimeInterval(-startedMinutesAgo * 60),
                                duration: durationMinutes * 60,
                                isHighTemp: true, automatic: true,
@@ -195,7 +195,7 @@ class PodCommsSessionTests: XCTestCase, PodCommsSessionDelegate {
         XCTAssertTrue(temp.podLoanRearmHandoverCancel())
         XCTAssertFalse(temp.podLoanRearmHandoverCancel(), "idempotent — signature cleared by first re-arm")
 
-        var bolus = UnfinalizedDose(bolusAmount: 2.0, startTime: Date().addingTimeInterval(-10),
+        var bolus = UnfinalizedDose(decisionId: nil, bolusAmount: 2.0, startTime: Date().addingTimeInterval(-10),
                                     scheduledCertainty: .certain, insulinType: .novolog)
         bolus.cancel(at: Date())
         XCTAssertFalse(bolus.podLoanRearmHandoverCancel(), "boluses are never C5-cancelled — refuse")
