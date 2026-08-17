@@ -261,8 +261,13 @@ extension OmniPumpManager {
     /// the takeover's scan-and-adopt landed 4/4 from arbitrary state. The phone had no way to
     /// reach that path — the escalation was gated watchOS-only — so a hand-back settle sat on the
     /// bare connect: measured at 224.2s and 237.0s on consecutive evenings, on the escape hatch.
-    public func escalateConnectionReclaim() {
+    @discardableResult
+    public func escalateConnectionReclaim() -> String? {
+        guard let address = state.podState?.address else {
+            return "no pod address on this phone — nothing to escalate"
+        }
         podLoanEscalateReclaim()
+        return String(format: "scan-adopt armed for pod 0x%X", address)
     }
 
 
