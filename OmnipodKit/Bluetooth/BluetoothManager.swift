@@ -171,12 +171,6 @@ class BluetoothManager: NSObject {
     /// cleared once adopted.
     private var loanTakeoverPodId: UInt32? = nil
 
-    /// The peripheral an adopted takeover is currently connecting to. Non-nil means a takeover
-    /// connect is IN FLIGHT, which still outranks the idle fault-watch for the scan filter —
-    /// adoption alone does not end the takeover. Cleared on connect, or when the takeover is
-    /// cancelled.
-    private var connectingTakeoverPeripheralID: String? = nil
-
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
 
@@ -668,7 +662,6 @@ class BluetoothManager: NSObject {
             guard self.loanTakeoverPodId != nil else { return }
             self.log.default("PODLOAN: cancelling unfinished reclaim-escalation scan")
             self.loanTakeoverPodId = nil
-            self.connectingTakeoverPeripheralID = nil
             if self.manager.state == .poweredOn, self.manager.isScanning, !self.discoveryModeEnabled {
                 self.manager.stopScan()
             }
@@ -1056,7 +1049,7 @@ class BluetoothManager: NSObject {
         let serviceUUID: CBUUID = podScanServiceUUID
         let services: [CBUUID]?
         let options: [String: Any]
-        if discoveryModeEnabled || loanTakeoverPodId != nil || connectingTakeoverPeripheralID != nil {
+        if discoveryModeEnabled || loanTakeoverPodId != nil {
             // Pairing OR PODLOAN takeover: scan for the pod's main advertisement service, so a pod
             // this device holds no peripheral for is actually found.
             //
@@ -1433,27 +1426,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // nothing here — the address is the only identifier both devices agree on. Match it,
             // record THIS device's identifier as the pod's, and connect; the session
             // re-establishes from the granted keys.
-            if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected,
-               connectingTakeoverPeripheralID == nil || connectingTakeoverPeripheralID == peripheral.identifier.uuidString {
+            if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected {
                 let adopted = peripheral.identifier.uuidString
                 log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
-                // ADOPTION IS NOT THE END OF THE TAKEOVER — the connect still has to land.
-                //
-                // Clearing the claim here dropped the takeover's hold on the scan FILTER while its
-                // connect was still in flight, so the next arming fell through to the idle
-                // low-power fault-watch (C00A). A healthy pod never advertises C00A, so from that
-                // moment the watch was listening for something that could not come. Field
-                // 2026-08-18: the pod's advertisement arrived 1.7 s after the takeover scan
-                // started, the filter was re-armed to C00A eleven seconds later, and the takeover
-                // then spent 189 s finding nothing — matching two earlier measurements of 190.9 s
-                // and 195.2 s, both after 8 reads.
-                //
-                // The claim is now released where the takeover actually resolves: on connect, or
-                // when the takeover is cancelled. `connectingTakeoverPeripheralID` keeps the
-                // adoption idempotent — a second advertisement must not re-enter this branch.
-                connectingTakeoverPeripheralID = adopted
+                loanTakeoverPodId = nil
                 autoConnectIDs.insert(adopted)
-                connectionDelegate?.omnipodLogDeviceEvent("[loan-takeover] adopted pod 0x\(String(takeoverId, radix: 16)) as \(adopted) — connecting, filter held")
                 connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
                 timedConnect(peripheral)  // takeover — an explicit connect, not auto-reconnect
             } else {
@@ -1493,14 +1470,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
-
-        // A takeover connect has landed: the claim on the scan filter ends HERE, not at
-        // adoption. Releasing it any earlier is what let the idle fault-watch re-arm C00A
-        // underneath an in-flight connect.
-        if let claimed = connectingTakeoverPeripheralID, claimed == peripheral.identifier.uuidString {
-            connectingTakeoverPeripheralID = nil
-            connectionDelegate?.omnipodLogDeviceEvent("[loan-takeover] connect landed — filter claim released")
-        }
 
         // STAMP THE CALLBACK ITSELF. The takeover/reclaim ladders poll `peripheral.state` from a
         // timer that watchOS defers by tens of seconds when the app is not frontmost, so a poll can
