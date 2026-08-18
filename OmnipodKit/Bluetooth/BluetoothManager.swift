@@ -516,6 +516,23 @@ class BluetoothManager: NSObject {
     /// left disconnected between commands (and observable via advertisements) and connected on
     /// demand by PeripheralManager. Explicit connects (pairing, retrieveAndConnectKnownPod, the
     /// on-demand connect) do NOT route through here and are unaffected.
+    /// What THIS process is holding, for the code-11 diagnosis. `devices` is our own list; the
+    /// state tally is what CoreBluetooth thinks each peripheral is doing right now. `auto` is
+    /// autoConnectIDs — the set the retry loop churns on — so if it grows across epochs that is a
+    /// second leak, independent of any storm.
+    private func peripheralCensus() -> String {   // managerQueue
+        var connected = 0, connecting = 0, disconnected = 0, other = 0
+        for d in devices {
+            switch d.manager.peripheral.state {
+            case .connected:     connected += 1
+            case .connecting:    connecting += 1
+            case .disconnected:  disconnected += 1
+            default:             other += 1
+            }
+        }
+        return "devices=\(devices.count)(conn \(connected)/ing \(connecting)/dis \(disconnected)/other \(other)) auto=\(autoConnectIDs.count)"
+    }
+
     private func autoReconnect(_ peripheral: CBPeripheral) {
         if BluetoothManager.connectOnDemandEnabled {
             log.debug("[connectOnDemand] suppressing auto-reconnect to %{public}@", peripheral.identifier.uuidString)
@@ -1454,6 +1471,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        // STAMP THE CALLBACK ITSELF. The takeover/reclaim ladders poll `peripheral.state` from a
+        // timer that watchOS defers by tens of seconds when the app is not frontmost, so a poll can
+        // never say WHEN the link came up — only when we next got around to looking. Observation
+        // only; changes nothing about connection behaviour.
+        PodLoanConnectClock.noteConnect()
+
         // We are connected — any outstanding fresh-discovery cold-connect fallback is now moot. Clearing
         // the token no-ops a still-pending 4s fallback timer (connectViaFreshDiscovery) so it cannot fire
         // freshConnect() → cancelPeripheralConnection() against THIS live link. That stale-timer teardown,
@@ -1516,6 +1539,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        // Records WHY the link dropped, not just that it did — the reason separates "the pod went
+        // away" from "we tore it down ourselves".
+        PodLoanConnectClock.noteDisconnect(error: error)
+
         log.default("[#%{public}@] DISCONNECTED: %{public}@ error=%{public}@ willReconnect=%{public}@", instanceID, peripheral,
                     String(describing: error), String(describing: autoConnectIDs.contains(peripheral.identifier.uuidString)))
 
@@ -1560,12 +1587,38 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        // Census AT THE MOMENT OF FAILURE. CBErrorConnectionLimitReached (11) says the CONTROLLER
+        // is out of connection slots, and the only way to tell "our own storm" from "slots
+        // consumed outside this process" is to count what WE are holding when it fires. Two
+        // peripherals and still code 11 => not ours. A dozen => entirely ours.
+        PodLoanConnectClock.noteFailToConnect(error: error, census: peripheralCensus())
+
         log.error("[#%{public}@] FAILED TO CONNECT: %{public}@ error=%{public}@", instanceID, peripheral, String(describing: error))
 
         connectionDelegate?.omnipodPeripheralDidFailToConnect(peripheral: peripheral, error: error)
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
-            autoReconnect(peripheral)
+            // NEVER RE-CONNECT INSTANTLY. CBErrorDomain Code=11 (connectionLimitReached) fails in
+            // MICROSECONDS — no slot is going to appear between this callback and an immediate
+            // retry — so an instant reconnect spins a tight loop at ~2,000 iterations/second
+            // (measured on the pure line: 1051 identical log lines in 0.52 s; 688 in 0.38 s).
+            // Each iteration logs through NSLog and the watch's mirrored file log, jamming syslogd
+            // and the log-append queue hard enough to STARVE THE MAIN THREAD — a reproducible
+            // glance freeze followed by a watchdog kill, which on that line ended three loans in a
+            // day before it was found.
+            //
+            // A 2 s backoff preserves the auto-reconnect contract (the pod is re-acquired as soon
+            // as a slot frees) while making the failure path ~4,000x cooler. Applied to ALL
+            // failure codes, not just 11: no failure mode is answered better by an instant
+            // identical retry. Routed through `autoReconnect` rather than connecting directly so
+            // the connect-on-demand suppression still applies at fire time.
+            let id = peripheral.identifier.uuidString
+            managerQueue.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self = self,
+                      self.autoConnectIDs.contains(id),
+                      peripheral.state == .disconnected else { return }
+                self.autoReconnect(peripheral)
+            }
         }
         delayedProbeInFlight = false
         resumeScanIfNeeded()   // keep the fault-listener alarm scan running while idle
