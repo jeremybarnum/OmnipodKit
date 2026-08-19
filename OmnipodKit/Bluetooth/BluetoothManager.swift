@@ -196,6 +196,50 @@ class BluetoothManager: NSObject {
     /// The last connect failure, kept so a settle that never verifies can say WHY.
     private var lastConnectFailure: (id: String, code: String, at: Date)?
 
+    // MARK: - Connect-intent ledger (instrumentation only — changes nothing)
+    //
+    // CoreBluetooth connect requests do not time out: a connect() that never resolves stays
+    // pending until it is explicitly cancelled. The leading theory for the field Code=11
+    // clusters ("maximum number of connections", hitting the pod AND the G7, cleared only by a
+    // Bluetooth toggle) is that intents abandoned by central teardown accumulate at the system
+    // level — recreateCentral drops the central commenting that this "clears the stalled
+    // pending connect", and this ledger exists to test exactly that assumption.
+    //
+    // issued on every connect(); closed by didConnect / didFailToConnect / an explicit cancel;
+    // ORPHANED when a central is dropped while intents are still open. If the theory is right,
+    // orphaned climbs across a session and Code=11 clusters follow it; if orphaned stays flat
+    // or Code=11 arrives without it, the theory is dead and we look elsewhere.
+    private var openConnectIntents: Set<String> = []
+    private var intentsIssued = 0
+    private var intentsResolved = 0      // didConnect
+    private var intentsRefused = 0       // didFailToConnect
+    private var intentsCancelled = 0     // explicit cancelPeripheralConnection
+    private var intentsOrphaned = 0      // open at central teardown — the leak candidate
+
+    private func noteConnectIssued(_ peripheral: CBPeripheral, via: String) {
+        let id = peripheral.identifier.uuidString
+        if !openConnectIntents.contains(id) {
+            openConnectIntents.insert(id)
+            intentsIssued += 1
+        }
+        connectionDelegate?.omnipodLogDeviceEvent("[intent] connect via \(via) → \(intentSummary)")
+    }
+
+    private func noteConnectClosed(_ peripheral: CBPeripheral, how: String) {
+        let id = peripheral.identifier.uuidString
+        guard openConnectIntents.remove(id) != nil else { return }
+        switch how {
+        case "resolved": intentsResolved += 1
+        case "refused": intentsRefused += 1
+        default: intentsCancelled += 1
+        }
+        connectionDelegate?.omnipodLogDeviceEvent("[intent] \(how) → \(intentSummary)")
+    }
+
+    var intentSummary: String {
+        "open=\(openConnectIntents.count) issued=\(intentsIssued) ok=\(intentsResolved) refused=\(intentsRefused) cancelled=\(intentsCancelled) ORPHANED=\(intentsOrphaned)"
+    }
+
     /// One line of BLE state for the loan's diagnostics.
     ///
     /// The phone's settle printed "ble: no diagnostics from the pump manager" on both of its
@@ -223,7 +267,7 @@ class BluetoothManager: NSObject {
         let failure = lastConnectFailure.map {
             String(format: "lastFail=%@ @%.0fs ago", $0.code, Date().timeIntervalSince($0.at))
         } ?? "lastFail=none"
-        return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) "
+        return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) intents[\(intentSummary)] "
             + "autoConnect=\(autoConnectIDs.count) marker=\(loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil") "
             + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure)"
     }
@@ -505,6 +549,7 @@ class BluetoothManager: NSObject {
                 self.delayedProbeInFlight = false
                 if !self.shouldHoldConnection {
                     for device in self.devices where device.manager.peripheral.state != .disconnected {
+                        self.noteConnectClosed(device.manager.peripheral, how: "cancelled")
                         self.manager.cancelPeripheralConnection(device.manager.peripheral)
                     }
                 }
@@ -519,6 +564,7 @@ class BluetoothManager: NSObject {
             connectRequestedAt[peripheral.identifier.uuidString] = Date()
         }
         let cm: CBCentralManager = manager
+        noteConnectIssued(peripheral, via: "timedConnect")
         cm.connect(peripheral, options: nil)
     }
 
@@ -567,6 +613,7 @@ class BluetoothManager: NSObject {
         let pid = ProcessInfo.processInfo.processIdentifier
         log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delaySeconds, peripheral.identifier.uuidString)
         connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delaySeconds)s")
+        noteConnectIssued(peripheral, via: "delayedProbe")
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delaySeconds)])
     }
 
@@ -646,6 +693,16 @@ class BluetoothManager: NSObject {
     private func recreateCentral() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         log.default("PODLOAN: recreating CBCentralManager to clear a wedged/stalled BLE stack")
+        // LEDGER, not a fix: this drop assumes it "clears the stalled pending connect", and
+        // whether that is true at the SYSTEM level is precisely the open question. Intents open
+        // at teardown are counted as ORPHANED; if the field Code=11 clusters track this number,
+        // the assumption is false and the fix is to cancel before dropping. Counting first.
+        if !openConnectIntents.isEmpty {
+            intentsOrphaned += openConnectIntents.count
+            connectionDelegate?.omnipodLogDeviceEvent(
+                "[intent] recreateCentral ORPHANS \(openConnectIntents.count) open intent(s) → \(intentSummary)")
+            openConnectIntents.removeAll()
+        }
         manager.delegate = nil
         devices.removeAll()
         manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
@@ -758,6 +815,7 @@ class BluetoothManager: NSObject {
                    (peripheral.state == .connected || peripheral.state == .connecting)
                 {
                     log.default("Disconnecting from peripheral: %{public}@", peripheral)
+                    noteConnectClosed(peripheral, how: "cancelled")
                     manager.cancelPeripheralConnection(peripheral)
                 }
             }
@@ -810,6 +868,7 @@ class BluetoothManager: NSObject {
             if let idx = self.devices.firstIndex(where: { $0.manager.peripheral.identifier.uuidString == uuidString }) {
                 let peripheral = self.devices[idx].manager.peripheral
                 if peripheral.state == .connected || peripheral.state == .connecting {
+                    self.noteConnectClosed(peripheral, how: "cancelled")
                     self.manager.cancelPeripheralConnection(peripheral)
                 }
                 self.devices.remove(at: idx)
@@ -838,6 +897,7 @@ class BluetoothManager: NSObject {
                 switch peripheral.state {
                 case .connected:
                     log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
+                    noteConnectClosed(peripheral, how: "cancelled")
                     manager.cancelPeripheralConnection(peripheral)
                 case .connecting, .disconnecting:
                     #if os(watchOS)
@@ -852,6 +912,7 @@ class BluetoothManager: NSObject {
                     // iOS (stock): cancel a pending connect; leave a disconnecting one.
                     if peripheral.state == .connecting {
                         log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
+                        noteConnectClosed(peripheral, how: "cancelled")
                         manager.cancelPeripheralConnection(peripheral)
                     }
                     #endif
@@ -982,12 +1043,14 @@ class BluetoothManager: NSObject {
             pendingFreshConnectID = nil
             return
         }
+        noteConnectClosed(peripheral, how: "cancelled")
         manager.cancelPeripheralConnection(peripheral)
         let target = manager.retrievePeripherals(withIdentifiers: [peripheral.identifier]).first ?? peripheral
         // Keep the session's peripheral reference in sync with the object we actually connect.
         if let device = devices.first(where: { $0.manager.peripheral.identifier == peripheral.identifier }) {
             device.manager.peripheral = target
         }
+        noteConnectIssued(target, via: "freshConnect")
         manager.connect(target, options: nil)
     }
 
@@ -1017,6 +1080,7 @@ class BluetoothManager: NSObject {
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
             delayedProbeInFlight = false
             delayedProbeIssuedAt = nil
+            noteConnectClosed(peripheral, how: "cancelled")
             manager.cancelPeripheralConnection(peripheral)
         }
         commandConnectInFlight = true
@@ -1085,6 +1149,7 @@ class BluetoothManager: NSObject {
             guard let self = self else { return }
             self.commandConnectInFlight = false
             self.log.default("[connectOnDemand] central.cancel on managerQueue for %{public}@", peripheral.identifier.uuidString)
+            noteConnectClosed(peripheral, how: "cancelled")
             self.manager.cancelPeripheralConnection(peripheral)
         }
     }
@@ -1439,6 +1504,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 // the peripheral was just heard and is connectable, so skip the cancel+re-retrieve
                 // stale-flush (an In-Play stall workaround) that added a round-trip on the good pod.
                 managerQueue.async { [weak self] in
+                    self?.noteConnectIssued(peripheral, via: "adopt-retry")
                     self?.manager.connect(peripheral, options: nil)
                 }
             }
@@ -1532,6 +1598,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
+        noteConnectClosed(peripheral, how: "resolved")
+
         // We are connected — any outstanding fresh-discovery cold-connect fallback is now moot. Clearing
         // the token no-ops a still-pending 4s fallback timer (connectViaFreshDiscovery) so it cannot fire
         // freshConnect() → cancelPeripheralConnection() against THIS live link. That stale-timer teardown,
@@ -1577,6 +1645,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // Loop's resulting status/dose commands run via connect-on-demand rather than fighting this
             // transient probe link.
             pendingHeartbeatFire = true
+            noteConnectClosed(peripheral, how: "cancelled")
             manager.cancelPeripheralConnection(peripheral)
             return
         }
@@ -1650,6 +1719,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.error("[#%{public}@] FAILED TO CONNECT: %{public}@ error=%{public}@", instanceID, peripheral, String(describing: error))
 
+        noteConnectClosed(peripheral, how: "refused")
         lastConnectFailure = (id: peripheral.identifier.uuidString,
                               code: (error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "no-error",
                               at: Date())
