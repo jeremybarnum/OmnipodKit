@@ -113,6 +113,10 @@ class BlePodComms: PodComms {
         } else {
             log.error("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
         }
+        // Tell the BLE layer a loan is on. Diagnostics only -- nothing branches on it -- but until now
+        // OmnipodKit had NO concept of a loan, so a connect arriving from any path that does not consult
+        // autoConnectIDs/devices was invisible. See the CONNECT WHILE ON LOAN alarm.
+        bluetoothManager.connectionReleasedForLoan = true
         // PODLOAN E4 (157): a reclaim escalation may have armed the takeover-grade scan;
         // releasing the pod ends the bid entirely, so the scan must not outlive it and
         // contend with the G7 window. No-op when nothing is armed. Ungated with the
@@ -124,6 +128,7 @@ class BlePodComms: PodComms {
     // peripheral via retrievePeripherals and connects; the session re-establishes
     // on next contact (pod-side EAP resynchronization).
     func rearmConnection() {
+        bluetoothManager.connectionReleasedForLoan = false
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
         }

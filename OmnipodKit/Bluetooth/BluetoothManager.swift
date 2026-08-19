@@ -217,6 +217,39 @@ class BluetoothManager: NSObject {
     private var intentsOrphaned = 0      // open at central teardown — the leak candidate
     private var intentsSuppressed = 0    // duplicate connect() refused by us before CoreBluetooth saw it
 
+    // ADVERT CENSUS (2026-08-19). The decisive gap: a reclaim ladder that fails today prints "14 reads,
+    // never reconnected" and says NOTHING about what the radio heard. Every failed ladder in e132 issued
+    // ZERO connects -- the pod never advertised, or we never heard it -- so the whole connect-side story
+    // was about the wrong stage. A ladder that saw 3 adverts and did not connect is a DIFFERENT BUG from
+    // one that saw 0, and right now those are indistinguishable.
+    //
+    // Cheap by construction: two Ints and a Date, written on a queue we are already on.
+    /// Mirrors `OmniPumpManager.isConnectionReleased` down into the BLE layer, which otherwise has no
+    /// concept of a loan at all. Diagnostics ONLY -- nothing branches on it. Set by the pump manager at
+    /// release and reclaim; a connect issued while this is true is logged loudly and still allowed,
+    /// because suppressing it would be a behaviour change dressed up as instrumentation.
+    public var connectionReleasedForLoan = false
+
+    private var ownPodAdvertsSeen = 0
+    private var ownPodAdvertLastAt: Date?
+    private var ownPodAdvertLastRSSI: Int?
+
+    /// Adverts heard from OUR pod since `resetAdvertCensus()`, for the ladder to print on completion.
+    /// Any-queue safe: plain value reads, no locking, diagnostics only.
+    public var advertCensus: String {
+        let age = ownPodAdvertLastAt.map { String(format: "%.0fs", -$0.timeIntervalSinceNow) } ?? "never"
+        return "adverts=\(ownPodAdvertsSeen) last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-")"
+    }
+
+    /// Zero the advert census. Called at ladder start so the count is per-ladder, not per-session.
+    public func resetAdvertCensus() {
+        managerQueue.async {
+            self.ownPodAdvertsSeen = 0
+            self.ownPodAdvertLastAt = nil
+            self.ownPodAdvertLastRSSI = nil
+        }
+    }
+
     /// Registers a connect intent and reports whether the caller should actually issue `connect()`.
     ///
     /// FIELD 2026-08-19 12:56:53.974. `timedConnect` and `adopt-retry` both issued `connect()` for the
@@ -254,6 +287,16 @@ class BluetoothManager: NSObject {
             connectionDelegate?.omnipodLogDeviceEvent(
                 "[intent] connect via \(via) SUPPRESSED (\(why)) → \(intentSummary)")
             return false
+        }
+        // LOAN CONTENTION ALARM (2026-08-19). OmnipodKit has no concept of a loan -- isolation is
+        // achieved indirectly, by emptying autoConnectIDs/devices so the automatic paths find nothing.
+        // That covers the paths that consult them; it cannot cover a connect arriving any other way,
+        // because there is no flag to consult. On 2026-08-19 the phone reported `link up +0.0s` after
+        // 110 s of silence during a loan the watch was failing to take over -- a link it should not
+        // have had, with no record of how it got one. This line is that record.
+        if connectionReleasedForLoan {
+            connectionDelegate?.omnipodLogDeviceEvent(
+                "[intent] ** CONNECT WHILE ON LOAN ** via \(via) — this central is contending for a pod it lent away")
         }
         openConnectIntents.insert(id)
         intentsIssued += 1
@@ -305,7 +348,7 @@ class BluetoothManager: NSObject {
         } ?? "lastFail=none"
         return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) intents[\(intentSummary)] "
             + "autoConnect=\(autoConnectIDs.count) marker=\(loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil") "
-            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure)"
+            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus)"
     }
 
     /// The uuidPdmId is set after pairing...
@@ -1495,6 +1538,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // faulted pod can wake us — we must NOT act on it (no false alarm, and no foreign connect or
         // scan-suppression). Advert LOGGING below stays on any pod-shaped frame (diagnostics + pairing).
         let isOwnPod = autoConnectIDs.contains(peripheral.identifier.uuidString)
+        // Census BEFORE any filtering or gating below: the question a failed ladder needs answered is
+        // "did the radio hear the pod at all", and that must not depend on advertisementMonitorEnabled,
+        // podType, or whether anything downstream chose to act on the frame.
+        if isOwnPod {
+            ownPodAdvertsSeen += 1
+            ownPodAdvertLastAt = Date()
+            ownPodAdvertLastRSSI = RSSI.intValue
+        }
         if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
             let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
             let mfg = (advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)?.hexadecimalString ?? "-"
