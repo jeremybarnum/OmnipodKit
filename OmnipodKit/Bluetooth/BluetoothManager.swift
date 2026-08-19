@@ -215,14 +215,50 @@ class BluetoothManager: NSObject {
     private var intentsRefused = 0       // didFailToConnect
     private var intentsCancelled = 0     // explicit cancelPeripheralConnection
     private var intentsOrphaned = 0      // open at central teardown — the leak candidate
+    private var intentsSuppressed = 0    // duplicate connect() refused by us before CoreBluetooth saw it
 
-    private func noteConnectIssued(_ peripheral: CBPeripheral, via: String) {
+    /// Registers a connect intent and reports whether the caller should actually issue `connect()`.
+    ///
+    /// FIELD 2026-08-19 12:56:53.974. `timedConnect` and `adopt-retry` both issued `connect()` for the
+    /// same pod in the SAME MILLISECOND; CoreBluetooth answered `CBErrorDomain Code=11` ("maximum
+    /// number of connections"), and a single connect 0.75 s later succeeded against an unchanged
+    /// system. The ledger cleared the two competing explanations that session: `ORPHANED=1` was
+    /// standing across connects that SUCCEEDED (so a leaked intent does not hold a slot), and the G7
+    /// had disconnected 2.3 s earlier (so it was not holding the link). What was left was our own
+    /// duplicate.
+    ///
+    /// A pending connect is already doing everything a duplicate would — `connect()` has no timeout
+    /// and stays live until cancelled — so a second one buys nothing and can cost a refusal.
+    /// G7SensorKit learned this as the #101 churn fix (`G7BluetoothManager.handleDiscoveredPeripheral`
+    /// returns early on `.connecting`); the pod path never got the equivalent. This is that guard.
+    ///
+    /// Suppression is counted, not silent: if `SUPPRESSED` climbs while reclaims still fail, the
+    /// duplicate was not the disease and the next suspect is watchOS releasing a slot lazily.
+    /// `force` is for the deliberate cancel-then-reconnect (`freshConnect`), whose whole purpose is to
+    /// replace a link that may still read `.connected`/`.disconnecting` for a moment after the cancel.
+    /// Suppressing it would defeat the stale-flush; ignoring the return value instead would issue a
+    /// connect the ledger never recorded, and the ledger is the instrument. So: register, don't block.
+    private func noteConnectIssued(_ peripheral: CBPeripheral, via: String, force: Bool = false) -> Bool {
         let id = peripheral.identifier.uuidString
-        if !openConnectIntents.contains(id) {
-            openConnectIntents.insert(id)
-            intentsIssued += 1
+        // `.connecting` is checked alongside our own book because the peripheral can be in flight from
+        // a path that never registered an intent, and CoreBluetooth counts that state either way.
+        //
+        // `.connected` is deliberately NOT guarded. Connecting an already-connected peripheral makes
+        // CoreBluetooth re-deliver didConnect immediately, and a state machine somewhere may be leaning
+        // on that re-delivery; this file compiles into the PHONE as well as the watch, so suppressing it
+        // would risk wedging the phone's pod link to fix a watch symptom. The observed defect was two
+        // connects racing while one was IN FLIGHT — that is what this guards, and no more.
+        if !force, openConnectIntents.contains(id) || peripheral.state == .connecting {
+            intentsSuppressed += 1
+            let why = peripheral.state == .connecting ? "connect in flight" : "intent already open"
+            connectionDelegate?.omnipodLogDeviceEvent(
+                "[intent] connect via \(via) SUPPRESSED (\(why)) → \(intentSummary)")
+            return false
         }
+        openConnectIntents.insert(id)
+        intentsIssued += 1
         connectionDelegate?.omnipodLogDeviceEvent("[intent] connect via \(via) → \(intentSummary)")
+        return true
     }
 
     private func noteConnectClosed(_ peripheral: CBPeripheral, how: String) {
@@ -237,7 +273,7 @@ class BluetoothManager: NSObject {
     }
 
     var intentSummary: String {
-        "open=\(openConnectIntents.count) issued=\(intentsIssued) ok=\(intentsResolved) refused=\(intentsRefused) cancelled=\(intentsCancelled) ORPHANED=\(intentsOrphaned)"
+        "open=\(openConnectIntents.count) issued=\(intentsIssued) ok=\(intentsResolved) refused=\(intentsRefused) cancelled=\(intentsCancelled) ORPHANED=\(intentsOrphaned) suppressed=\(intentsSuppressed)"
     }
 
     /// One line of BLE state for the loan's diagnostics.
@@ -564,7 +600,7 @@ class BluetoothManager: NSObject {
             connectRequestedAt[peripheral.identifier.uuidString] = Date()
         }
         let cm: CBCentralManager = manager
-        noteConnectIssued(peripheral, via: "timedConnect")
+        guard noteConnectIssued(peripheral, via: "timedConnect") else { return }
         cm.connect(peripheral, options: nil)
     }
 
@@ -613,7 +649,12 @@ class BluetoothManager: NSObject {
         let pid = ProcessInfo.processInfo.processIdentifier
         log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delaySeconds, peripheral.identifier.uuidString)
         connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delaySeconds)s")
-        noteConnectIssued(peripheral, via: "delayedProbe")
+        guard noteConnectIssued(peripheral, via: "delayedProbe") else {
+            // The re-arm found a connect already in flight. Roll back the probe bookkeeping set
+            // just above, or delayedProbeInFlight latches true against a probe never issued.
+            delayedProbeInFlight = false
+            return
+        }
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delaySeconds)])
     }
 
@@ -1050,7 +1091,7 @@ class BluetoothManager: NSObject {
         if let device = devices.first(where: { $0.manager.peripheral.identifier == peripheral.identifier }) {
             device.manager.peripheral = target
         }
-        noteConnectIssued(target, via: "freshConnect")
+        _ = noteConnectIssued(target, via: "freshConnect", force: true)
         manager.connect(target, options: nil)
     }
 
@@ -1503,9 +1544,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 // stopScan, then connect on the just-heard advert. Direct connect (not freshConnect):
                 // the peripheral was just heard and is connectable, so skip the cancel+re-retrieve
                 // stale-flush (an In-Play stall workaround) that added a round-trip on the good pod.
+                // Deferred one tick so the stopScan settles first — which is exactly the window in
+                // which another path (a reclaim ladder's timedConnect) can connect the same pod.
+                // Re-check on arrival rather than on scheduling.
                 managerQueue.async { [weak self] in
-                    self?.noteConnectIssued(peripheral, via: "adopt-retry")
-                    self?.manager.connect(peripheral, options: nil)
+                    guard let self, self.noteConnectIssued(peripheral, via: "adopt-retry") else { return }
+                    self.manager.connect(peripheral, options: nil)
                 }
             }
             // Kick off / re-arm the delayed-connect probe once we know the pod is present + disconnected.
