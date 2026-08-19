@@ -30,7 +30,9 @@ class BlePodComms: PodComms {
 
     private var needsSessionEstablishment: Bool = false
 
-    private var bluetoothManager: BluetoothManager!
+    /// Internal, not private: OmniPumpManager+PodLoan reads `loanBleDiagnostics` off it for the
+    /// loan's settle diagnostics, which reported nothing at all before.
+    private(set) var bluetoothManager: BluetoothManager!
 
     override init(podState: PodState?, podType: PodType, myId: UInt32 = 0, podId: UInt32 = 0) {
         super.init(podState: podState, podType: podType, myId: myId, podId: podId)

@@ -189,6 +189,45 @@ class BluetoothManager: NSObject {
     /// Why the marker last moved. Set immediately before each write; the didSet reports it.
     private var loanScanMarkerReason = "init"
 
+    /// A pod whose advertisement matched the loan marker and which we are now connecting to.
+    /// The marker stays armed until this peripheral actually connects — see the adopt block.
+    private var pendingAdoptedLoanPod: String?
+
+    /// The last connect failure, kept so a settle that never verifies can say WHY.
+    private var lastConnectFailure: (id: String, code: String, at: Date)?
+
+    /// One line of BLE state for the loan's diagnostics.
+    ///
+    /// The phone's settle printed "ble: no diagnostics from the pump manager" on both of its
+    /// ceiling failures (e124, e127) because `connectionDiagnostics()` has a default returning
+    /// nil and nothing overrode it. So at the exact moment the phone could not reach a pod that
+    /// nothing else was holding, its BLE layer said nothing at all — and any theory about the
+    /// phone half was unfalsifiable.
+    ///
+    /// Reports the things that distinguish the candidates: whether the radio is on, whether we
+    /// are scanning, how many peripherals we are holding, what the pod's own peripheral thinks,
+    /// and the last connect refusal. `CBErrorDomain#11` here means the system connection table is
+    /// full, which is a host state and not a pod fault — and it is the one a Bluetooth toggle
+    /// clears.
+    var loanBleDiagnostics: String {
+        let radio: String
+        switch manager.state {
+        case .poweredOn:   radio = "on"
+        case .poweredOff:  radio = "OFF"
+        case .resetting:   radio = "resetting"
+        case .unauthorized: radio = "unauthorized"
+        case .unsupported: radio = "unsupported"
+        case .unknown:     radio = "unknown"
+        @unknown default:  radio = "unknown(\(manager.state.rawValue))"
+        }
+        let failure = lastConnectFailure.map {
+            String(format: "lastFail=%@ @%.0fs ago", $0.code, Date().timeIntervalSince($0.at))
+        } ?? "lastFail=none"
+        return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) "
+            + "autoConnect=\(autoConnectIDs.count) marker=\(loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil") "
+            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure)"
+    }
+
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
 
@@ -1434,8 +1473,24 @@ extension BluetoothManager: CBCentralManagerDelegate {
             if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected {
                 let adopted = peripheral.identifier.uuidString
                 log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
-                loanScanMarkerReason = "adopted"
-            loanTakeoverPodId = nil
+                // KEEP THE MARKER UNTIL THE CONNECT IS CONFIRMED.
+                //
+                // This used to clear it here, on merely HEARING a matching advertisement. Field
+                // 2026-08-19, one millisecond apart:
+                //
+                //   07:31:43.285  [loan-scan] marker 0x177e6b7e -> nil (adopted)
+                //   07:31:43.294  Pod failed to connect … CBErrorDomain Code=11
+                //                 "The system has reached the maximum number of connections"
+                //
+                // The connect was refused, and the ladder then polled for another twenty seconds
+                // with no scan armed and no marker — so connectOnDemand was free to stop and
+                // replace whatever scan remained, and a retry had nothing to hear the pod with.
+                // An advertisement means the pod is THERE, not that we have it.
+                //
+                // Cleared instead in didConnect (success) and left standing in didFailToConnect,
+                // so a refused connect keeps the scan armed for the next attempt. `cancelLoanScan`
+                // still clears it when the reclaim genuinely ends.
+                pendingAdoptedLoanPod = adopted
                 autoConnectIDs.insert(adopted)
                 connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
                 timedConnect(peripheral)  // takeover — an explicit connect, not auto-reconnect
@@ -1482,6 +1537,16 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // freshConnect() → cancelPeripheralConnection() against THIS live link. That stale-timer teardown,
         // re-read by didDisconnect as an unintended "drop", was the root of the self-inflicted
         // connect → cancel → "reconnecting after drop" → reconnect loop.
+        // The adoption is only real once the link is up. Until this point the marker stayed
+        // armed so the scan could keep hunting through a refused connect.
+        if pendingAdoptedLoanPod == peripheral.identifier.uuidString {
+            pendingAdoptedLoanPod = nil
+            if loanTakeoverPodId != nil {
+                loanScanMarkerReason = "adopted+connected"
+                loanTakeoverPodId = nil
+            }
+            connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: peripheral.identifier.uuidString)
+        }
         if pendingFreshConnectID == peripheral.identifier.uuidString {
             pendingFreshConnectID = nil
         }
@@ -1585,7 +1650,21 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.error("[#%{public}@] FAILED TO CONNECT: %{public}@ error=%{public}@", instanceID, peripheral, String(describing: error))
 
+        lastConnectFailure = (id: peripheral.identifier.uuidString,
+                              code: (error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "no-error",
+                              at: Date())
+
         connectionDelegate?.omnipodPeripheralDidFailToConnect(peripheral: peripheral, error: error)
+
+        // A refused adoption keeps the marker, so the scan stays armed for the next advertisement
+        // rather than leaving the ladder blind. Named loudly because Code=11 ("maximum number of
+        // connections") is a SYSTEM state, not a pod fault, and reads as one in a bare log.
+        if pendingAdoptedLoanPod == peripheral.identifier.uuidString {
+            pendingAdoptedLoanPod = nil
+            let code = (error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "no-error"
+            connectionDelegate?.omnipodLogDeviceEvent(
+                "[loan-scan] adoption connect FAILED (\(code)) — marker HELD, scan stays armed for the next advert")
+        }
 
         if autoConnectIDs.contains(peripheral.identifier.uuidString) {
             autoReconnect(peripheral)

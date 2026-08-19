@@ -314,6 +314,13 @@ extension OmniPumpManager {
     /// from "never reached .connected" from "connected but the status read failed" —
     /// three different bugs that look identical from outside (2026-07-22: three theories
     /// raised and falsified against exactly this blind spot). Read-only.
+    /// PumpConnectionLendable. The protocol default returns nil, which is what produced
+    /// "ble: no diagnostics from the pump manager" on both phone settle-ceiling failures.
+    public func connectionDiagnostics() -> String? {
+        guard let ble = (podComms as? BlePodComms)?.bluetoothManager else { return nil }
+        return "\(ble.loanBleDiagnostics) pod=\(podLoanConnectionStateDescription)"
+    }
+
     public var podLoanConnectionStateDescription: String {
         guard let peripheral = (podComms as? BlePodComms)?.manager?.peripheral else {
             return "no-peripheral"
