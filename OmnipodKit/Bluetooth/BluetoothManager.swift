@@ -169,7 +169,25 @@ class BluetoothManager: NSObject {
     /// nothing here — retrievePeripherals returns nothing. Instead we scan and adopt the
     /// pod by its advertised address (global). Set to the pod's address to arm takeover;
     /// cleared once adopted.
-    private var loanTakeoverPodId: UInt32? = nil
+    /// The takeover/reclaim scan marker.
+    ///
+    /// INSTRUMENTED 2026-08-18 because it went nil underneath a live reclaim ladder and nobody
+    /// could say who cleared it. connectOnDemand consults it (:881) to decide whether to leave a
+    /// running scan alone or stop and replace it with its own 4-second one, so a silent clear
+    /// hands the pod's discovery scan to a different owner mid-ladder. Three writers exist —
+    /// `escalateLoanReclaim` on each platform, `cancelLoanScan`, and adoption — and the log had
+    /// no way to tell them apart.
+    private var loanTakeoverPodId: UInt32? = nil {
+        didSet {
+            guard oldValue != loanTakeoverPodId else { return }
+            let from = oldValue.map { String(format: "0x%x", $0) } ?? "nil"
+            let to = loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil"
+            connectionDelegate?.omnipodLogDeviceEvent("[loan-scan] marker \(from) -> \(to) (\(loanScanMarkerReason))")
+        }
+    }
+
+    /// Why the marker last moved. Set immediately before each write; the didSet reports it.
+    private var loanScanMarkerReason = "init"
 
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
@@ -179,6 +197,7 @@ class BluetoothManager: NSObject {
     /// foreign identifier from the granted pod state.
     func beginLoanTakeover(podId: UInt32) {
         managerQueue.async {
+            self.loanScanMarkerReason = "beginLoanTakeover"
             self.loanTakeoverPodId = podId
             if self.manager.state == .poweredOn {
                 self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
@@ -604,6 +623,7 @@ class BluetoothManager: NSObject {
     func escalateLoanReclaim(podId: UInt32) {
         managerQueue.async {
             self.log.default("PODLOAN: reclaim escalation — recreating central + arming scan-adopt for pod 0x%x", podId)
+            self.loanScanMarkerReason = "escalate"
             self.loanTakeoverPodId = podId
             self.recreateCentral()
         }
@@ -627,6 +647,7 @@ class BluetoothManager: NSObject {
     func escalateLoanReclaim(podId: UInt32) {
         managerQueue.async {
             self.log.default("PODLOAN: reclaim escalation (iOS) — arming scan-adopt for pod 0x%x (central preserved)", podId)
+            self.loanScanMarkerReason = "escalate"
             self.loanTakeoverPodId = podId
             if self.manager.state == .poweredOn, !self.manager.isScanning {
                 self.startScanning()
@@ -644,6 +665,7 @@ class BluetoothManager: NSObject {
         managerQueue.async {
             guard self.loanTakeoverPodId != nil else { return }
             self.log.default("PODLOAN: cancelling unfinished reclaim-escalation scan")
+            self.loanScanMarkerReason = "cancelLoanScan"
             self.loanTakeoverPodId = nil
             if self.manager.state == .poweredOn, self.manager.isScanning, !self.discoveryModeEnabled {
                 self.manager.stopScan()
@@ -1412,7 +1434,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
             if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected {
                 let adopted = peripheral.identifier.uuidString
                 log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
-                loanTakeoverPodId = nil
+                loanScanMarkerReason = "adopted"
+            loanTakeoverPodId = nil
                 autoConnectIDs.insert(adopted)
                 connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
                 timedConnect(peripheral)  // takeover — an explicit connect, not auto-reconnect
