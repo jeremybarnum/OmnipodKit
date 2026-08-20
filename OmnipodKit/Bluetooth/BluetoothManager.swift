@@ -183,6 +183,9 @@ class BluetoothManager: NSObject {
             let from = oldValue.map { String(format: "0x%x", $0) } ?? "nil"
             let to = loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil"
             connectionDelegate?.omnipodLogDeviceEvent("[loan-scan] marker \(from) -> \(to) (\(loanScanMarkerReason))")
+            // The watchdog lives exactly as long as the marker: armed scans with an expectation of
+            // traffic are the only state it may police.
+            if loanTakeoverPodId != nil { armLoanScanWatchdog() } else { loanScanWatchdog?.cancel(); loanScanWatchdog = nil }
         }
     }
 
@@ -244,6 +247,42 @@ class BluetoothManager: NSObject {
     /// The interlock, on by default. Off restores the pre-2026-08-19 behaviour (log only, still connect).
     static var loanInterlockEnabled: Bool {
         UserDefaults.standard.object(forKey: "OmnipodKit.loanInterlockEnabled") as? Bool ?? true
+    }
+
+    // ANY-discovery census (H14 discriminator, 2026-08-20): a central that hears NOTHING AT ALL while
+    // the Mac observer hears traffic is starved; one that hears others but not the pod is mis-filtered.
+    // Different bugs, previously indistinguishable.
+    private var lastAnyDiscoveryAt: Date?
+    private var anyDiscoveryCount = 0
+
+    // SCAN WATCHDOG (H14 probe + remedy). Field 2026-08-20 01:15-01:21: settle scan-adopt armed,
+    // isScanning=true, allowDuplicates=true, the Mac hearing the pod at -56 dBm every 2-7 s — and zero
+    // didDiscover for six minutes. Whatever the root cause, stopScan + a fresh arm is correct under
+    // every theory, and each firing is a measurement. Runs only while the loan marker is armed (the one
+    // state in which the pod is expected free and advertising); 45 s of silence there is deafness — a
+    // free pod advertises every ≤8 s.
+    private var loanScanWatchdog: DispatchSourceTimer?
+    private var scanWatchdogRestarts = 0
+
+    private func armLoanScanWatchdog() {
+        loanScanWatchdog?.cancel()
+        let armedAt = Date()
+        let t = DispatchSource.makeTimerSource(queue: managerQueue)
+        t.schedule(deadline: .now() + 20, repeating: 20)
+        t.setEventHandler { [weak self] in
+            guard let self, self.loanTakeoverPodId != nil, self.manager.isScanning else { return }
+            let last = self.lastAnyDiscoveryAt ?? armedAt
+            let age = -last.timeIntervalSinceNow
+            guard age > 45 else { return }
+            self.scanWatchdogRestarts += 1
+            self.connectionDelegate?.omnipodLogDeviceEvent(
+                "[scan-watchdog] DEAF SCAN: isScanning=true but no didDiscover of ANYTHING for \(Int(age))s with the loan marker armed — stopScan + fresh arm (restart #\(self.scanWatchdogRestarts), H14 probe)")
+            self.manager.stopScan()
+            self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID],
+                                            options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        }
+        t.resume()
+        loanScanWatchdog = t
     }
 
     private var ownPodAdvertsSeen = 0
@@ -399,7 +438,7 @@ class BluetoothManager: NSObject {
         } ?? "lastFail=none"
         return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) intents[\(intentSummary)] "
             + "autoConnect=\(autoConnectIDs.count) marker=\(loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil") "
-            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus) \(blockedSummary)"
+            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus) anyDiscover=\(anyDiscoveryCount) scanWD=\(scanWatchdogRestarts) \(blockedSummary)"
     }
 
     /// The uuidPdmId is set after pairing...
@@ -1577,6 +1616,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
+        lastAnyDiscoveryAt = Date(); anyDiscoveryCount += 1
 
         log.debug("%{public}@: %{public}@, %{public}@", #function, peripheral, advertisementData)
 
