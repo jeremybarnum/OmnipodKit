@@ -76,6 +76,11 @@ class BlePodComms: PodComms {
     // scan-adopt, plus a fresh central on watchOS. Ungated: the phone reclaims too (hand-back
     // settle, grant-lost, escape hatch) and was measured at 224s on the bare pending-connect.
     func escalateLoanReclaim(podId: UInt32) {
+        // Escalating IS the owner asserting the pod back, so it must clear the loan interlock or the
+        // escape hatch would be refused by the very guard meant to protect the loan. The PHONE reaches
+        // here via escalateConnectionReclaim(), which (unlike reclaimConnection) does NOT set
+        // podConnectionReleased = false -- so without this line a stranded pod could not be recovered.
+        bluetoothManager.connectionReleasedForLoan = false
         bluetoothManager.escalateLoanReclaim(podId: podId)
     }
 

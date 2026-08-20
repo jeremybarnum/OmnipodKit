@@ -230,15 +230,39 @@ class BluetoothManager: NSObject {
     /// because suppressing it would be a behaviour change dressed up as instrumentation.
     public var connectionReleasedForLoan = false
 
+    /// Which callers tried to connect to a lent pod, and how often. Surfaced in `loanBleDiagnostics`
+    /// so it rides the phone's existing 60 s census — the alarm itself goes to LoopKit's device-comms
+    /// store, which is unreadable on the phone, and that is why the mechanism stayed unidentified for
+    /// two days despite being instrumented.
+    private var blockedWhileLoaned: [String: Int] = [:]
+
+    var blockedSummary: String {
+        blockedWhileLoaned.isEmpty ? "whileLoaned=none"
+            : "whileLoaned=" + blockedWhileLoaned.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+    }
+
+    /// The interlock, on by default. Off restores the pre-2026-08-19 behaviour (log only, still connect).
+    static var loanInterlockEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.loanInterlockEnabled") as? Bool ?? true
+    }
+
     private var ownPodAdvertsSeen = 0
     private var ownPodAdvertLastAt: Date?
     private var ownPodAdvertLastRSSI: Int?
+
+    /// Interval between the last two adverts we heard, in seconds. H7 (2026-08-19) — "the pod's idle
+    /// advertising interval exceeds our 28 s ladder budget" — could NOT be scored from the first
+    /// census because the ladder stops as soon as it connects, so the counts measured how long we
+    /// listened rather than how often the pod speaks. This is uncensored: it keeps updating whether or
+    /// not a ladder is running, so a steady-state reading answers the question directly.
+    private var lastAdvertGap: TimeInterval?
 
     /// Adverts heard from OUR pod since `resetAdvertCensus()`, for the ladder to print on completion.
     /// Any-queue safe: plain value reads, no locking, diagnostics only.
     public var advertCensus: String {
         let age = ownPodAdvertLastAt.map { String(format: "%.0fs", -$0.timeIntervalSinceNow) } ?? "never"
-        return "adverts=\(ownPodAdvertsSeen) last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-")"
+        let gap = lastAdvertGap.map { String(format: "%.1fs", $0) } ?? "-"
+        return "adverts=\(ownPodAdvertsSeen) last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-") gap=\(gap)"
     }
 
     /// Zero the advert census. Called at ladder start so the count is per-ladder, not per-session.
@@ -294,9 +318,27 @@ class BluetoothManager: NSObject {
         // because there is no flag to consult. On 2026-08-19 the phone reported `link up +0.0s` after
         // 110 s of silence during a loan the watch was failing to take over -- a link it should not
         // have had, with no record of how it got one. This line is that record.
+        // THE LOAN INTERLOCK (2026-08-19). Measured that day: the PHONE connected to the pod every
+        // 2-3 minutes for the whole loan, released=true throughout, every connect SUCCEEDING -- and a
+        // pod in a connection does not advertise, so the watch's reclaim ladders heard nothing and
+        // failed. Phone ON: 0/13 ladders succeeded. Phone OFF: 7/9, flipping 44 s after power-down and
+        // reverting 11 s after power-up.
+        //
+        // Isolation used to be INDIRECT -- empty autoConnectIDs and devices so the automatic paths find
+        // nothing -- which covers the paths that consult them and cannot cover any other, because there
+        // was no flag to consult. This is that flag, enforced.
+        //
+        // SAFETY. Every path that legitimately wants the pod back clears the flag FIRST:
+        // reclaimConnection() sets podConnectionReleased = false before rearmConnection(), and the
+        // escalation (the phone's escape hatch for a stranded pod) clears it in escalateLoanReclaim.
+        // So this can refuse a contending connect but never a recovery.
+        //
+        // Reversible without a rebuild: set OmnipodKit.loanInterlockEnabled = false in UserDefaults.
         if connectionReleasedForLoan {
+            blockedWhileLoaned[via, default: 0] += 1
             connectionDelegate?.omnipodLogDeviceEvent(
-                "[intent] ** CONNECT WHILE ON LOAN ** via \(via) — this central is contending for a pod it lent away")
+                "[intent] ** CONNECT WHILE ON LOAN ** via \(via) — \(BluetoothManager.loanInterlockEnabled ? "REFUSED" : "allowed (interlock off)") · \(blockedSummary)")
+            if BluetoothManager.loanInterlockEnabled { return false }
         }
         openConnectIntents.insert(id)
         intentsIssued += 1
@@ -348,7 +390,7 @@ class BluetoothManager: NSObject {
         } ?? "lastFail=none"
         return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) intents[\(intentSummary)] "
             + "autoConnect=\(autoConnectIDs.count) marker=\(loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil") "
-            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus)"
+            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus) \(blockedSummary)"
     }
 
     /// The uuidPdmId is set after pairing...
@@ -1542,8 +1584,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // "did the radio hear the pod at all", and that must not depend on advertisementMonitorEnabled,
         // podType, or whether anything downstream chose to act on the frame.
         if isOwnPod {
+            let now = Date()
+            if let prev = ownPodAdvertLastAt { lastAdvertGap = now.timeIntervalSince(prev) }
             ownPodAdvertsSeen += 1
-            ownPodAdvertLastAt = Date()
+            ownPodAdvertLastAt = now
             ownPodAdvertLastRSSI = RSSI.intValue
         }
         if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
