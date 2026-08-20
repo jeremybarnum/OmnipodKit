@@ -185,9 +185,18 @@ class BluetoothManager: NSObject {
             connectionDelegate?.omnipodLogDeviceEvent("[loan-scan] marker \(from) -> \(to) (\(loanScanMarkerReason))")
             // The watchdog lives exactly as long as the marker: armed scans with an expectation of
             // traffic are the only state it may police.
+            if let id = loanTakeoverPodId { lastKnownLoanPodId = id }
             if loanTakeoverPodId != nil { armLoanScanWatchdog() } else { loanScanWatchdog?.cancel(); loanScanWatchdog = nil }
         }
     }
+
+    /// The last pod id the loan marker ever held, and never cleared. The marker itself is nil for most
+    /// of the gap BETWEEN reclaim ladders, and the advert census used to fall back to autoConnectIDs
+    /// membership in that window — which `releaseConnection()` empties, so the census went blind at
+    /// exactly the moment it was being read as evidence ("adverts=0 last=never" for two nights).
+    /// The pod id is stable for the life of the pod, so matching against it is correct in every window
+    /// and depends on nothing the release path mutates.
+    private var lastKnownLoanPodId: UInt32?
 
     /// Why the marker last moved. Set immediately before each write; the didSet reports it.
     private var loanScanMarkerReason = "init"
@@ -267,6 +276,12 @@ class BluetoothManager: NSObject {
 
     private var lastAnyDiscoveryAt: Date?
     private var anyDiscoveryCount = 0
+    /// Baselines so the census reports THIS ladder rather than the session. See `advertCensus`.
+    private var anyDiscoveryAtCensusReset = 0
+    private var heardNotAdoptedAtCensusReset = 0
+    /// When each peripheral was first seen in a non-`.disconnected` state, so the adopt gate can tell
+    /// a healthy in-flight adopt from a wedged one. See the `[adopt-gate]` line.
+    private var nonDisconnectedSince: [String: Date] = [:]
 
     // SCAN WATCHDOG (H14 probe + remedy). Field 2026-08-20 01:15-01:21: settle scan-adopt armed,
     // isScanning=true, allowDuplicates=true, the Mac hearing the pod at -56 dBm every 2-7 s — and zero
@@ -281,8 +296,17 @@ class BluetoothManager: NSObject {
         loanScanWatchdog?.cancel()
         let armedAt = Date()
         lastAnyDiscoveryAt = nil   // fresh baseline per arm; ages are per-window, never cumulative
+        var restartsThisArm = 0
         let t = DispatchSource.makeTimerSource(queue: managerQueue)
-        t.schedule(deadline: .now() + 20, repeating: 20)
+        // CADENCE vs LADDER BUDGET (2026-08-20). This was 20 s / 20 s / 45 s of silence, which made
+        // the watchdog STRUCTURALLY UNABLE to fire inside the failure it was built for: a reclaim
+        // ladder is 14 reads x ~2 s = 28.2 s, so the earliest possible firing landed ~17 s after the
+        // ladder had already given up and torn the marker down. That is the whole reason the wrist
+        // read `scanWD=0` during failing reclaims — not "no deafness detected" but "never checked".
+        // 5 s cadence / 15 s threshold fires at 15-20 s into a 28 s ladder, leaving 8-13 s for a
+        // restarted scan to hear the pod and adopt it. 15 s is not arbitrary: a free pod advertises
+        // every <=8 s, so 15 s of silence on an armed scan is already two missed windows.
+        t.schedule(deadline: .now() + 5, repeating: 5)
         t.setEventHandler { [weak self] in
             // SCOPE (2026-08-20 fix): this used to require `loanTakeoverPodId != nil`, so it only
             // policed during an armed takeover. The marker is nil for most of the gap BETWEEN reclaim
@@ -304,10 +328,16 @@ class BluetoothManager: NSObject {
             // bug let the reported age accumulate to 7777s across unrelated windows.
             let last = max(self.lastAnyDiscoveryAt ?? armedAt, armedAt)
             let age = -last.timeIntervalSinceNow
-            guard age > 45 else { return }
+            guard age > 15 else { return }
+            // Bounded. A restart that does not help must not become a 5 s churn loop for the life of
+            // the arm — three attempts inside one ladder is already the whole budget, and beyond that
+            // the diagnosis is "restarting does not fix it", which is a finding, not a reason to keep
+            // hammering the radio.
+            guard restartsThisArm < 3 else { return }
+            restartsThisArm += 1
             self.scanWatchdogRestarts += 1
             self.connectionDelegate?.omnipodLogDeviceEvent(
-                "[scan-watchdog] DEAF SCAN: isScanning=true but no didDiscover of ANYTHING for \(Int(age))s with the loan marker armed — stopScan + fresh arm (restart #\(self.scanWatchdogRestarts), H14 probe)")
+                "[scan-watchdog] DEAF SCAN: isScanning=true but no didDiscover of ANYTHING for \(Int(age))s while scanning — stopScan + fresh arm (restart #\(self.scanWatchdogRestarts), \(restartsThisArm)/3 this arm)")
             self.manager.stopScan()
             self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID],
                                             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
@@ -332,7 +362,25 @@ class BluetoothManager: NSObject {
     public var advertCensus: String {
         let age = ownPodAdvertLastAt.map { String(format: "%.0fs", -$0.timeIntervalSinceNow) } ?? "never"
         let gap = lastAdvertGap.map { String(format: "%.1fs", $0) } ?? "-"
-        return "adverts=\(ownPodAdvertsSeen) last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-") gap=\(gap)"
+        // THE ONE BIT THE LADDER COULD NOT REPORT (2026-08-20). Field e13:00:16: scan armed at
+        // 12:59:51.181, ladder ran 28.2 s / 14 reads, peripheral `.disconnected` throughout, verdict
+        // "never reconnected" — while the Mac scanner heard that same pod every 2-7 s. Two
+        // incompatible stories fit that line equally well and the log could not separate them:
+        // the central heard NOTHING (deaf scan, wrong filter, radio wedged), or it heard the pod fine
+        // and every frame was rejected at a gate. `adverts=` cannot arbitrate, because it counts only
+        // frames that ALREADY passed the address match.
+        //
+        // `anySeen` counts didDiscover callbacks for ANY device since the ladder began. Three verdicts
+        // from one number:
+        //   anySeen=0                  → deafness. The connect side is beside the point.
+        //   anySeen>0, adverts=0       → we are hearing the air but not our pod: filter/address fault.
+        //   adverts>0, no adopt        → we heard it and failed to connect: connect-side fault.
+        // `skipped` is the adopt gate's own count over the same window, so a ladder that heard the pod
+        // and refused to adopt it says so on the line that declares the failure.
+        let anySeen = anyDiscoveryCount - anyDiscoveryAtCensusReset
+        let skipped = podHeardButNotAdopted - heardNotAdoptedAtCensusReset
+        return "adverts=\(ownPodAdvertsSeen) anySeen=\(anySeen) skipped=\(skipped) "
+            + "last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-") gap=\(gap)"
     }
 
     /// Zero the advert census. Called at ladder start so the count is per-ladder, not per-session.
@@ -341,6 +389,8 @@ class BluetoothManager: NSObject {
             self.ownPodAdvertsSeen = 0
             self.ownPodAdvertLastAt = nil
             self.ownPodAdvertLastRSSI = nil
+            self.anyDiscoveryAtCensusReset = self.anyDiscoveryCount
+            self.heardNotAdoptedAtCensusReset = self.podHeardButNotAdopted
         }
     }
 
@@ -423,6 +473,20 @@ class BluetoothManager: NSObject {
         intentsIssued += 1
         connectionDelegate?.omnipodLogDeviceEvent("[intent] connect via \(via) → \(intentSummary)")
         return true
+    }
+
+    /// Attributes a cancel of a LIVE link — one where the connect intent was already closed as
+    /// `resolved` by didConnect, so `noteConnectClosed` is a no-op (its `guard remove != nil` returns
+    /// immediately) and `cancels=` never names the site.
+    ///
+    /// Two sites were silently unattributed for this reason: `didConnect-dupe` (the delayed-probe wake
+    /// that connects and immediately hangs up) and `enterBackground` (which cancels a `.connected`
+    /// peripheral). Both are real hang-ups the ladder needs to see. `cancels=` is the instrument for
+    /// "who let go of the pod", and an instrument with two holes in it answers `cancels=none` to a
+    /// question whose true answer was one of the two.
+    private func noteLinkTornDown(_ peripheral: CBPeripheral, by site: String) {
+        cancelsByCaller[site, default: 0] += 1
+        connectionDelegate?.omnipodLogDeviceEvent("[intent] live link torn down by \(site) → \(intentSummary)")
     }
 
     private func noteConnectClosed(_ peripheral: CBPeripheral, how: String) {
@@ -1262,7 +1326,14 @@ class BluetoothManager: NSObject {
         if let device = devices.first(where: { $0.manager.peripheral.identifier == peripheral.identifier }) {
             device.manager.peripheral = target
         }
-        _ = noteConnectIssued(target, via: "freshConnect", force: true)
+        // OBEY THE VERDICT (2026-08-20). This discarded the return value, so on the PHONE during a
+        // loan the interlock logged "** CONNECT WHILE ON LOAN ** — REFUSED" and the connect went out
+        // one line later regardless. A log that reports a refusal that did not happen is worse than no
+        // log: it was read as evidence the interlock was holding while the phone was still taking the
+        // pod. `force: true` means the only thing that can return false here is that interlock, which
+        // is compiled in on iOS only — so on the watch this guard is unconditionally true and the
+        // stale-flush behaviour is unchanged.
+        guard noteConnectIssued(target, via: "freshConnect", force: true) else { return }
         manager.connect(target, options: nil)
     }
 
@@ -1346,6 +1417,10 @@ class BluetoothManager: NSObject {
         if peripheral.state == .connected || peripheral.state == .connecting {
             log.default("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] background — disconnecting, resuming heartbeat probe")
+            // Attribute it. A `.connected` peripheral has no open intent left to close, so the ordinary
+            // path recorded nothing and this site never appeared in `cancels=`.
+            if peripheral.state == .connected { noteLinkTornDown(peripheral, by: "enterBackground") }
+            else { noteConnectClosed(peripheral, how: "cancelled:enterBackground") }
             manager.cancelPeripheralConnection(peripheral)   // didDisconnect resumes scan + arms probe
         } else {
             resumeScanIfNeeded()                             // fault-listener scan while idle
@@ -1685,7 +1760,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // the census must mirror.
         let parsedAdv = PodAdvertisement(advertisementData, podType: podType)
         let addressMatches = parsedAdv.map { adv in
-            loanTakeoverPodId.map { $0 == adv.podId } ?? autoConnectIDs.contains(peripheral.identifier.uuidString)
+            // Marker first, then the sticky id (see `lastKnownLoanPodId`), and only if we have never
+            // seen a pod id at all does this fall back to set membership — the circular test that made
+            // the census lie. In practice that last case is the pre-first-loan cold start, where there
+            // is no loan to measure anyway.
+            if let want = loanTakeoverPodId ?? lastKnownLoanPodId { return want == adv.podId }
+            return autoConnectIDs.contains(peripheral.identifier.uuidString)
         } ?? false
         if addressMatches {
             let now = Date()
@@ -1697,9 +1777,27 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // and a peripheral stuck in .connecting (an orphaned connect) silently skips adoption
             // forever. Report the state so the failing gate is named instead of inferred.
             if loanTakeoverPodId != nil, peripheral.state != .disconnected {
-                podHeardButNotAdopted += 1
-                connectionDelegate?.omnipodLogDeviceEvent(
-                    "[adopt-gate] HEARD our pod (rssi \(RSSI)) but state=\(peripheral.state.rawValue) != disconnected — adopt SKIPPED (#\(podHeardButNotAdopted))")
+                // DWELL QUALIFIED (2026-08-20). The bare state test fires on every HEALTHY adopt: the
+                // pod keeps advertising for the second or two it sits in `.connecting`, so a normal
+                // successful takeover printed "adopt SKIPPED" several times on its way to succeeding.
+                // That is the instrument crying wolf on the good case, and it would have buried the
+                // real signal on the one ladder that matters. The defect this line exists to catch is a
+                // peripheral WEDGED in `.connecting` — an orphaned connect that never resolves and
+                // silently blocks adoption forever — and that is a dwell-time condition, not a state
+                // condition. 10 s is well past any healthy connect (field connects resolve in <1 s)
+                // and well short of the 28 s ladder, so a wedge still gets named inside the window.
+                let id = peripheral.identifier.uuidString
+                let since = nonDisconnectedSince[id] ?? now
+                if nonDisconnectedSince[id] == nil { nonDisconnectedSince[id] = now }
+                let dwell = now.timeIntervalSince(since)
+                if dwell > 10 {
+                    podHeardButNotAdopted += 1
+                    connectionDelegate?.omnipodLogDeviceEvent(String(format:
+                        "[adopt-gate] HEARD our pod (rssi %@) but state=%d != disconnected for %.0fs — WEDGED, adopt SKIPPED (#%d)",
+                        "\(RSSI)", peripheral.state.rawValue, dwell, podHeardButNotAdopted))
+                }
+            } else {
+                nonDisconnectedSince[peripheral.identifier.uuidString] = nil
             }
         }
         if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
@@ -1896,7 +1994,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // Loop's resulting status/dose commands run via connect-on-demand rather than fighting this
             // transient probe link.
             pendingHeartbeatFire = true
-            noteConnectClosed(peripheral, how: "cancelled:didConnect-dupe")
+            noteLinkTornDown(peripheral, by: "didConnect-dupe")
             manager.cancelPeripheralConnection(peripheral)
             return
         }
