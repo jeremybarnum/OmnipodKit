@@ -334,12 +334,21 @@ class BluetoothManager: NSObject {
         // So this can refuse a contending connect but never a recovery.
         //
         // Reversible without a rebuild: set OmnipodKit.loanInterlockEnabled = false in UserDefaults.
+        // iOS ONLY -- and this gate is the whole lesson. `releaseConnection()` means two DIFFERENT
+        // things on the two devices: on the PHONE it means "I have lent this pod away"; on the WATCH
+        // it is the routine POST-DOSE release, "done dosing for a moment, still mine". Setting one
+        // flag from both made the watch refuse its OWN reconnects after its first dose — 18 REFUSED
+        // takeover connects in the field within minutes of shipping it (2026-08-19 21:2x, timedConnect
+        // and adopt-retry), stalling the ladder with didConnect never (n=0). The phone is the only
+        // device that lends, so it is the only device this may guard.
+        #if os(iOS)
         if connectionReleasedForLoan {
             blockedWhileLoaned[via, default: 0] += 1
             connectionDelegate?.omnipodLogDeviceEvent(
                 "[intent] ** CONNECT WHILE ON LOAN ** via \(via) — \(BluetoothManager.loanInterlockEnabled ? "REFUSED" : "allowed (interlock off)") · \(blockedSummary)")
             if BluetoothManager.loanInterlockEnabled { return false }
         }
+        #endif
         openConnectIntents.insert(id)
         intentsIssued += 1
         connectionDelegate?.omnipodLogDeviceEvent("[intent] connect via \(via) → \(intentSummary)")
