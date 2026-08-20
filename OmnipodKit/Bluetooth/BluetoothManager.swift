@@ -1391,6 +1391,11 @@ class BluetoothManager: NSObject {
             log.default("Start scanning (%{public}@ filter=%{public}@)", reason, serviceUUID.uuidString)
             connectionDelegate?.omnipodLogDeviceEvent("[\(reason)] scan started (filter=\(serviceUUID.uuidString))")
             manager.scanForPeripherals(withServices: services, options: options)
+            // Watchdog follows the SCAN, not the marker (2026-08-20 review). The didSet arming alone
+            // left the timer dead for the between-ladders gap, so scanWD=0 meant "never checked".
+            // Armed HERE — the acquisition-scan branch only — it can never police the C00A alarm
+            // scan, whose silence is normal and whose filter a spurious restart would clobber.
+            armLoanScanWatchdog()
             return
         }
         guard BluetoothManager.scanningEnabled else {
@@ -1429,6 +1434,7 @@ class BluetoothManager: NSObject {
 
     private func stopScanning() {
         log.default("Stop scanning")
+        loanScanWatchdog?.cancel(); loanScanWatchdog = nil
         manager.stopScan()
     }
 
