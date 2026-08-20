@@ -267,11 +267,23 @@ class BluetoothManager: NSObject {
     private func armLoanScanWatchdog() {
         loanScanWatchdog?.cancel()
         let armedAt = Date()
+        lastAnyDiscoveryAt = nil   // fresh baseline per arm; ages are per-window, never cumulative
         let t = DispatchSource.makeTimerSource(queue: managerQueue)
         t.schedule(deadline: .now() + 20, repeating: 20)
         t.setEventHandler { [weak self] in
             guard let self, self.loanTakeoverPodId != nil, self.manager.isScanning else { return }
-            let last = self.lastAnyDiscoveryAt ?? armedAt
+            // A CONNECTED POD DOES NOT ADVERTISE (2026-08-20 fix). The first cut policed silence
+            // whenever the marker was armed — but the E4 reclaim path arms it while the pod is
+            // already connected, so the absence of didDiscover was CORRECT and the watchdog read it
+            // as deafness: 69 spurious firings in one session, every 20 s, churning stopScan + arm
+            // for nothing. Only police while genuinely waiting to DISCOVER something.
+            let podBusy = self.devices.contains {
+                $0.manager.peripheral.state == .connected || $0.manager.peripheral.state == .connecting
+            }
+            guard !podBusy else { return }
+            // ...and measure from when THIS arm began, not from a stale session-wide stamp; the same
+            // bug let the reported age accumulate to 7777s across unrelated windows.
+            let last = max(self.lastAnyDiscoveryAt ?? armedAt, armedAt)
             let age = -last.timeIntervalSinceNow
             guard age > 45 else { return }
             self.scanWatchdogRestarts += 1
