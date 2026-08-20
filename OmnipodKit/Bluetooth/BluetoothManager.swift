@@ -279,6 +279,10 @@ class BluetoothManager: NSObject {
     /// Baselines so the census reports THIS ladder rather than the session. See `advertCensus`.
     private var anyDiscoveryAtCensusReset = 0
     private var heardNotAdoptedAtCensusReset = 0
+    /// The wildcard (unfiltered) probe: when it began, and the discovery count at that moment.
+    /// Read live by `advertCensus`, so the ladder's own failure line carries the verdict.
+    private var wildcardProbeStartedAt: Date?
+    private var wildcardProbeBaseline = 0
     /// When each peripheral was first seen in a non-`.disconnected` state, so the adopt gate can tell
     /// a healthy in-flight adopt from a wedged one. See the `[adopt-gate]` line.
     private var nonDisconnectedSince: [String: Date] = [:]
@@ -334,12 +338,31 @@ class BluetoothManager: NSObject {
             // the diagnosis is "restarting does not fix it", which is a finding, not a reason to keep
             // hammering the radio.
             guard restartsThisArm < 3 else { return }
-            restartsThisArm += 1
             self.scanWatchdogRestarts += 1
             self.connectionDelegate?.omnipodLogDeviceEvent(
-                "[scan-watchdog] DEAF SCAN: isScanning=true but no didDiscover of ANYTHING for \(Int(age))s while scanning — stopScan + fresh arm (restart #\(self.scanWatchdogRestarts), \(restartsThisArm)/3 this arm)")
+                "[scan-watchdog] DEAF SCAN: isScanning=true but no didDiscover of ANYTHING for \(Int(age))s while scanning — stopScan + fresh arm (restart #\(self.scanWatchdogRestarts), \(restartsThisArm + 1)/3 this arm, filter=\((restartsThisArm + 1) % 2 == 1 ? "WILDCARD probe" : "pod service"))")
+            // WILDCARD PROBE (2026-08-20). A filtered scan cannot tell us whether the radio is
+            // receiving: didDiscover only fires for peripherals advertising the pod service, so a deaf
+            // central and a pod whose frames never match look the same from inside. Every odd restart
+            // therefore re-arms with NO service filter. Hearing anything at all proves the central is
+            // receiving, which moves the fault to the frames or the filter and takes deafness off the
+            // table; hearing nothing unfiltered, in a room with any BLE traffic in it, is deafness
+            // demonstrated rather than inferred.
+            //
+            // It is not only a probe. A wildcard scan is a strict SUPERSET of the filtered one — the
+            // adopt path matches the address out of the parsed advertisement and does not care which
+            // filter surfaced it — so if the service filter is itself wrong for this pod, the wildcard
+            // arm discovers it and the takeover recovers. Diagnostic and candidate fix in one.
+            restartsThisArm += 1
+            let wildcard = restartsThisArm % 2 == 1
+            if wildcard {
+                self.wildcardProbeBaseline = self.anyDiscoveryCount
+                self.wildcardProbeStartedAt = Date()
+            } else {
+                self.wildcardProbeStartedAt = nil
+            }
             self.manager.stopScan()
-            self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID],
+            self.manager.scanForPeripherals(withServices: wildcard ? nil : [self.podScanServiceUUID],
                                             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         }
         t.resume()
@@ -370,16 +393,24 @@ class BluetoothManager: NSObject {
         // and every frame was rejected at a gate. `adverts=` cannot arbitrate, because it counts only
         // frames that ALREADY passed the address match.
         //
-        // `anySeen` counts didDiscover callbacks for ANY device since the ladder began. Three verdicts
-        // from one number:
-        //   anySeen=0                  → deafness. The connect side is beside the point.
-        //   anySeen>0, adverts=0       → we are hearing the air but not our pod: filter/address fault.
-        //   adverts>0, no adopt        → we heard it and failed to connect: connect-side fault.
+        // `anySeen` counts didDiscover callbacks for ANY device since the ladder began.
+        //   anySeen>0, adverts=0  → frames arrived and the address match rejected them.
+        //   adverts>0, no adopt   → we heard our pod and failed to connect: connect-side fault.
+        //
+        // `anySeen=0` is DELIBERATELY NOT read as deafness. The takeover scan is FILTERED on the pod's
+        // service UUID with allowDuplicates, so the only thing that can raise didDiscover at all is a
+        // pod — which makes "the central is deaf" and "our pod's frames are not arriving/matching"
+        // produce an identical anySeen=0. Separating those needs an UNFILTERED scan, which is what the
+        // watchdog's wildcard probe runs; `wildcard=heard/elapsed` below is that answer, and it is the
+        // only term here that can speak to deafness.
         // `skipped` is the adopt gate's own count over the same window, so a ladder that heard the pod
         // and refused to adopt it says so on the line that declares the failure.
         let anySeen = anyDiscoveryCount - anyDiscoveryAtCensusReset
         let skipped = podHeardButNotAdopted - heardNotAdoptedAtCensusReset
-        return "adverts=\(ownPodAdvertsSeen) anySeen=\(anySeen) skipped=\(skipped) "
+        let probe = wildcardProbeStartedAt.map {
+            String(format: " wildcard=%d/%.0fs", anyDiscoveryCount - wildcardProbeBaseline, -$0.timeIntervalSinceNow)
+        } ?? ""
+        return "adverts=\(ownPodAdvertsSeen) anySeen=\(anySeen) skipped=\(skipped)\(probe) "
             + "last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-") gap=\(gap)"
     }
 
@@ -391,6 +422,9 @@ class BluetoothManager: NSObject {
             self.ownPodAdvertLastRSSI = nil
             self.anyDiscoveryAtCensusReset = self.anyDiscoveryCount
             self.heardNotAdoptedAtCensusReset = self.podHeardButNotAdopted
+            // Per-ladder, like everything else here — a probe left over from the LAST ladder would
+            // print `wildcard=0/900s` against this one and read as a fresh negative result.
+            self.wildcardProbeStartedAt = nil
         }
     }
 
@@ -1464,7 +1498,16 @@ class BluetoothManager: NSObject {
             services = [serviceUUID]
             options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
             log.default("Start scanning (%{public}@ filter=%{public}@)", reason, serviceUUID.uuidString)
-            connectionDelegate?.omnipodLogDeviceEvent("[\(reason)] scan started (filter=\(serviceUUID.uuidString))")
+            // WHERE THE FILTER CAME FROM (2026-08-20). `podScanServiceUUID` has two branches — an O5
+            // UUID DERIVED from uuidPdmId, and the pod profile's static advertisement service — and a
+            // wrong branch produces a scan that cannot match at any distance, for any duration, with no
+            // symptom other than silence. That is indistinguishable from deafness in the log, and it is
+            // the cheapest of the candidate causes to rule in or out, so name the branch.
+            let filterSource = podType.isO5
+                ? (uuidPdmId != nil ? "O5/pdm-derived" : "O5/profile-fallback")
+                : "profile(\(String(describing: podType)))"
+            connectionDelegate?.omnipodLogDeviceEvent(
+                "[\(reason)] scan started (filter=\(serviceUUID.uuidString) via \(filterSource))")
             manager.scanForPeripherals(withServices: services, options: options)
             // Watchdog follows the SCAN, not the marker (2026-08-20 review). The didSet arming alone
             // left the timer dead for the between-ladders gap, so scanWD=0 meant "never checked".
@@ -1510,6 +1553,7 @@ class BluetoothManager: NSObject {
     private func stopScanning() {
         log.default("Stop scanning")
         loanScanWatchdog?.cancel(); loanScanWatchdog = nil
+        wildcardProbeStartedAt = nil
         manager.stopScan()
     }
 
