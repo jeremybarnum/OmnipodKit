@@ -1465,12 +1465,40 @@ class BluetoothManager: NSObject {
     /// Cancel/disconnect the peripheral on the central's queue. This is the idle-disconnect / teardown
     /// path, so we're going idle: clear commandConnectInFlight so the resulting didDisconnect re-arms
     /// the heartbeat probe.
-    func disconnectOnDemand(_ peripheral: CBPeripheral) {
+    /// `site` names WHY we are hanging up — "idle" (the between-commands idle-disconnect) or
+    /// "connectError" (connectOnDemand's catch, unsticking a connect after its command threw).
+    /// The ledger recorded both as one anonymous "cancelled:disconnectOnDemand", which is how the
+    /// loan-reclaim killer below hid for a week behind a legitimate teardown with the same name.
+    func disconnectOnDemand(_ peripheral: CBPeripheral, by site: String, detail: String? = nil) {
         managerQueue.async { [weak self] in
             guard let self = self else { return }
+            // THE LADDER'S OWN AXE (2026-08-20, loan e147). Every cancelled pod connect in the loan —
+            // 6 of 6 — was this teardown, at 0.36-1.87 s after the connect was issued, against a
+            // demonstrated ~1.3 s connect latency. The mechanism: the reclaim ladder polls every ~2 s;
+            // a poll's connect command can throw FAST (`notReady` / pending-conditions collision —
+            // runCommand's only sub-timeout throws; the 20 s timeout cannot fire at 0.4 s), and the
+            // catch then "cleaned up" by cancelling the in-flight connect — which was the recovery
+            // itself, about to land. L5 succeeded only because didConnect (1.28 s) beat the next
+            // poll's error; L14 got one attempt, cancelled at 0.36 s, and the cycle failed with
+            // enactFailed(communication(nil)).
+            //
+            // So: while the loan takeover/reclaim marker is armed, a connect-error teardown is
+            // FORBIDDEN — the error belongs to the failed poll, not to the connect. The connect stays
+            // pending (it has no timeout and adoption resolves it); if it truly wedges, the marker
+            // teardown at ladder end restores the old behavior for the next attempt, and freshConnect
+            // exists for exactly that unstick. The idle-disconnect site is untouched: it requires
+            // `.connected`, which an open connect intent excludes, so it was provably never the axe.
+            //
+            // Checked on managerQueue, where the marker is authoritative — no cross-queue race.
+            if site == "connectError", self.loanTakeoverPodId != nil {
+                self.connectionDelegate?.omnipodLogDeviceEvent(
+                    "[connectOnDemand] connect-command error (\(detail ?? "unknown")) during armed loan reclaim — pending connect LEFT RIDING (the connect is the recovery, not the wedge)")
+                return
+            }
             self.commandConnectInFlight = false
-            self.log.default("[connectOnDemand] central.cancel on managerQueue for %{public}@", peripheral.identifier.uuidString)
-            noteConnectClosed(peripheral, how: "cancelled:disconnectOnDemand")
+            self.log.default("[connectOnDemand] central.cancel on managerQueue for %{public}@ (site=%{public}@)", peripheral.identifier.uuidString, site)
+            if let detail { self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] teardown by \(site): \(detail)") }
+            noteConnectClosed(peripheral, how: "cancelled:onDemand-\(site)")
             self.manager.cancelPeripheralConnection(peripheral)
         }
     }

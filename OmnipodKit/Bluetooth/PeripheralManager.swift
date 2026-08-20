@@ -389,7 +389,10 @@ extension PeripheralManager {
         } catch {
             // Unstick a connect that never completed, so didDisconnect/didFailToConnect fires
             // instead of leaving it wedged in .connecting. Queue-correct cancel via BluetoothManager.
-            bluetoothManager?.disconnectOnDemand(peripheral)
+            // The site + error ride along: during an armed loan reclaim this cancel is refused there
+            // (the pending connect IS the recovery — see disconnectOnDemand), and the error text is
+            // what tells the next log whether the fast throw was notReady or a command collision.
+            bluetoothManager?.disconnectOnDemand(peripheral, by: "connectError", detail: String(describing: error))
             throw error
         }
         log.default("[connectOnDemand] connected in %{public}@s", String(format: "%.3f", Date().timeIntervalSince(start)))
@@ -720,7 +723,7 @@ extension PeripheralManager {
             self.log.default("[connectOnDemand] idle ~%{public}ds, no queued session -> disconnecting", Int(idleDelay))
             // Queue-correct cancel: route through BluetoothManager so it runs on managerQueue. Cancelling
             // from this (PeripheralManager) queue raced CoreBluetooth's teardown and wedged the next connect.
-            self.bluetoothManager?.disconnectOnDemand(self.peripheral)
+            self.bluetoothManager?.disconnectOnDemand(self.peripheral, by: "idle")
         }
     }
 }
