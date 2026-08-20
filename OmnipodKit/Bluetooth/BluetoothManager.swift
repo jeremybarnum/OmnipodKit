@@ -252,6 +252,19 @@ class BluetoothManager: NSObject {
     // ANY-discovery census (H14 discriminator, 2026-08-20): a central that hears NOTHING AT ALL while
     // the Mac observer hears traffic is starved; one that hears others but not the pod is mis-filtered.
     // Different bugs, previously indistinguishable.
+    /// Times we heard our own pod while the loan marker was armed but could NOT adopt it, because the
+    /// peripheral was not `.disconnected`. Non-zero here means the pod was audible and we declined it.
+    private var podHeardButNotAdopted = 0
+
+    /// Which code path cancelled each connect. A connect we cancel ourselves mid-ladder is
+    /// indistinguishable from a failed one in the outcome, but has an entirely different fix.
+    private var cancelsByCaller: [String: Int] = [:]
+
+    var cancelSummary: String {
+        cancelsByCaller.isEmpty ? "cancels=none"
+            : "cancels=" + cancelsByCaller.sorted { $0.value > $1.value }.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+    }
+
     private var lastAnyDiscoveryAt: Date?
     private var anyDiscoveryCount = 0
 
@@ -271,7 +284,13 @@ class BluetoothManager: NSObject {
         let t = DispatchSource.makeTimerSource(queue: managerQueue)
         t.schedule(deadline: .now() + 20, repeating: 20)
         t.setEventHandler { [weak self] in
-            guard let self, self.loanTakeoverPodId != nil, self.manager.isScanning else { return }
+            // SCOPE (2026-08-20 fix): this used to require `loanTakeoverPodId != nil`, so it only
+            // policed during an armed takeover. The marker is nil for most of the gap BETWEEN reclaim
+            // ladders — which is exactly when this morning's failures happened, and why scanWD=0 was
+            // read as "no deafness" when it actually meant "never checked". Police whenever we are
+            // SCANNING FOR the pod at all: an armed scan that hears nothing is the condition,
+            // regardless of which path armed it.
+            guard let self, self.manager.isScanning else { return }
             // A CONNECTED POD DOES NOT ADVERTISE (2026-08-20 fix). The first cut policed silence
             // whenever the marker was armed — but the E4 reclaim path arms it while the pod is
             // already connected, so the absence of didDiscover was CORRECT and the watchdog read it
@@ -412,7 +431,14 @@ class BluetoothManager: NSObject {
         switch how {
         case "resolved": intentsResolved += 1
         case "refused": intentsRefused += 1
-        default: intentsCancelled += 1
+        default:
+            intentsCancelled += 1
+            // WHICH call site cancelled (2026-08-20). Field L10: the ladder HEARD the pod (6 adverts,
+            // last 6 s before it expired, -81 dBm), issued timedConnect, and the connect was then
+            // CANCELLED BY US — not refused, not failed. The ledger recorded only "cancelled", and
+            // there are nine call sites that can do it, so the culprit was unnameable. `how` now
+            // carries the site, exactly as `via:` does for connects.
+            if how.hasPrefix("cancelled:") { cancelsByCaller[String(how.dropFirst(10)), default: 0] += 1 }
         }
         connectionDelegate?.omnipodLogDeviceEvent("[intent] \(how) → \(intentSummary)")
     }
@@ -450,7 +476,7 @@ class BluetoothManager: NSObject {
         } ?? "lastFail=none"
         return "radio=\(radio) scanning=\(manager.isScanning) devices=\(devices.count) intents[\(intentSummary)] "
             + "autoConnect=\(autoConnectIDs.count) marker=\(loanTakeoverPodId.map { String(format: "0x%x", $0) } ?? "nil") "
-            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus) anyDiscover=\(anyDiscoveryCount) scanWD=\(scanWatchdogRestarts) \(blockedSummary)"
+            + "pendingAdopt=\(pendingAdoptedLoanPod ?? "none") \(failure) \(advertCensus) anyDiscover=\(anyDiscoveryCount) heardNotAdopted=\(podHeardButNotAdopted) scanWD=\(scanWatchdogRestarts) \(cancelSummary) \(blockedSummary)"
     }
 
     /// The uuidPdmId is set after pairing...
@@ -730,7 +756,7 @@ class BluetoothManager: NSObject {
                 self.delayedProbeInFlight = false
                 if !self.shouldHoldConnection {
                     for device in self.devices where device.manager.peripheral.state != .disconnected {
-                        self.noteConnectClosed(device.manager.peripheral, how: "cancelled")
+                        self.noteConnectClosed(device.manager.peripheral, how: "cancelled:heartbeatRequest")
                         self.manager.cancelPeripheralConnection(device.manager.peripheral)
                     }
                 }
@@ -1001,7 +1027,7 @@ class BluetoothManager: NSObject {
                    (peripheral.state == .connected || peripheral.state == .connecting)
                 {
                     log.default("Disconnecting from peripheral: %{public}@", peripheral)
-                    noteConnectClosed(peripheral, how: "cancelled")
+                    noteConnectClosed(peripheral, how: "cancelled:endPodDiscovery")
                     manager.cancelPeripheralConnection(peripheral)
                 }
             }
@@ -1054,7 +1080,7 @@ class BluetoothManager: NSObject {
             if let idx = self.devices.firstIndex(where: { $0.manager.peripheral.identifier.uuidString == uuidString }) {
                 let peripheral = self.devices[idx].manager.peripheral
                 if peripheral.state == .connected || peripheral.state == .connecting {
-                    self.noteConnectClosed(peripheral, how: "cancelled")
+                    self.noteConnectClosed(peripheral, how: "cancelled:disconnectFromDevice")
                     self.manager.cancelPeripheralConnection(peripheral)
                 }
                 self.devices.remove(at: idx)
@@ -1083,7 +1109,7 @@ class BluetoothManager: NSObject {
                 switch peripheral.state {
                 case .connected:
                     log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
-                    noteConnectClosed(peripheral, how: "cancelled")
+                    noteConnectClosed(peripheral, how: "cancelled:updateConnections")
                     manager.cancelPeripheralConnection(peripheral)
                 case .connecting, .disconnecting:
                     #if os(watchOS)
@@ -1098,7 +1124,7 @@ class BluetoothManager: NSObject {
                     // iOS (stock): cancel a pending connect; leave a disconnecting one.
                     if peripheral.state == .connecting {
                         log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
-                        noteConnectClosed(peripheral, how: "cancelled")
+                        noteConnectClosed(peripheral, how: "cancelled:updateConnections")
                         manager.cancelPeripheralConnection(peripheral)
                     }
                     #endif
@@ -1229,7 +1255,7 @@ class BluetoothManager: NSObject {
             pendingFreshConnectID = nil
             return
         }
-        noteConnectClosed(peripheral, how: "cancelled")
+        noteConnectClosed(peripheral, how: "cancelled:freshConnect")
         manager.cancelPeripheralConnection(peripheral)
         let target = manager.retrievePeripherals(withIdentifiers: [peripheral.identifier]).first ?? peripheral
         // Keep the session's peripheral reference in sync with the object we actually connect.
@@ -1266,7 +1292,7 @@ class BluetoothManager: NSObject {
             connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
             delayedProbeInFlight = false
             delayedProbeIssuedAt = nil
-            noteConnectClosed(peripheral, how: "cancelled")
+            noteConnectClosed(peripheral, how: "cancelled:beginCommandConnect")
             manager.cancelPeripheralConnection(peripheral)
         }
         commandConnectInFlight = true
@@ -1335,7 +1361,7 @@ class BluetoothManager: NSObject {
             guard let self = self else { return }
             self.commandConnectInFlight = false
             self.log.default("[connectOnDemand] central.cancel on managerQueue for %{public}@", peripheral.identifier.uuidString)
-            noteConnectClosed(peripheral, how: "cancelled")
+            noteConnectClosed(peripheral, how: "cancelled:disconnectOnDemand")
             self.manager.cancelPeripheralConnection(peripheral)
         }
     }
@@ -1644,12 +1670,31 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // Census BEFORE any filtering or gating below: the question a failed ladder needs answered is
         // "did the radio hear the pod at all", and that must not depend on advertisementMonitorEnabled,
         // podType, or whether anything downstream chose to act on the frame.
-        if isOwnPod {
+        // COUNT BY ADDRESS, NOT BY autoConnectIDs (2026-08-20 correction). This was gated on
+        // `isOwnPod`, i.e. membership of autoConnectIDs — which releaseConnection() EMPTIES via
+        // disconnectFromDevice(). So after every post-dose release the pod's advertisements stopped
+        // being counted even though they were being RECEIVED, and `adverts=0 last=never` was read for
+        // two nights as "the watch cannot hear the pod". It may only ever have meant "not in the set".
+        // The adopt path itself matches the ADDRESS out of the parsed advertisement, so that is what
+        // the census must mirror.
+        let parsedAdv = PodAdvertisement(advertisementData, podType: podType)
+        let addressMatches = parsedAdv.map { adv in
+            loanTakeoverPodId.map { $0 == adv.podId } ?? autoConnectIDs.contains(peripheral.identifier.uuidString)
+        } ?? false
+        if addressMatches {
             let now = Date()
             if let prev = ownPodAdvertLastAt { lastAdvertGap = now.timeIntervalSince(prev) }
             ownPodAdvertsSeen += 1
             ownPodAdvertLastAt = now
             ownPodAdvertLastRSSI = RSSI.intValue
+            // WHY an adopt did not follow. The three gates are parse / address / peripheral state,
+            // and a peripheral stuck in .connecting (an orphaned connect) silently skips adoption
+            // forever. Report the state so the failing gate is named instead of inferred.
+            if loanTakeoverPodId != nil, peripheral.state != .disconnected {
+                podHeardButNotAdopted += 1
+                connectionDelegate?.omnipodLogDeviceEvent(
+                    "[adopt-gate] HEARD our pod (rssi \(RSSI)) but state=\(peripheral.state.rawValue) != disconnected — adopt SKIPPED (#\(podHeardButNotAdopted))")
+            }
         }
         if BluetoothManager.advertisementMonitorEnabled, isPodFrame {
             let svcUUIDs = advSvcUUIDs.map { $0.uuidString }.joined(separator: ",")
@@ -1845,7 +1890,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // Loop's resulting status/dose commands run via connect-on-demand rather than fighting this
             // transient probe link.
             pendingHeartbeatFire = true
-            noteConnectClosed(peripheral, how: "cancelled")
+            noteConnectClosed(peripheral, how: "cancelled:didConnect-dupe")
             manager.cancelPeripheralConnection(peripheral)
             return
         }
