@@ -665,12 +665,33 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
                 self.bleMessageTransportState = BleMessageTransportState()
             }
 
-            // BLE pod type specific values
-            if let ltkString = rawValue["ltk"] as? String,
-                let bleIdentifier = rawValue["bleIdentifier"] as? String
-            {
+            // BLE pod type specific values.
+            //
+            // DECODED INDEPENDENTLY, DELIBERATELY (2026-08-21). These were one `if let`, which
+            // coupled the pod's ENCRYPTION KEY to a CoreBluetooth handle — and the handle is the
+            // one field a caller is likely to consider disposable, because it is per-device and
+            // therefore meaningless on any machine but the one that minted it. Both the
+            // SportMode-next-dev port and the pure line carry loan-seam comments saying exactly
+            // that ("the phone's bleIdentifier is useless here"), which is the reasoning that
+            // leads someone to strip it from a serialized podState.
+            //
+            // Doing so silently dropped the LTK: takeovers then connected to the pod normally and
+            // were hung up on ~108 ms after the first command (Code=7), three grants in a row —
+            // a failure that looks like a radio problem and is nothing of the sort. Field
+            // 2026-08-21, port branch, epochs 150/151/152.
+            //
+            // A missing handle is recoverable (rediscover the pod). A missing key is not
+            // recoverable and is not visible. They must not share a condition.
+            if let ltkString = rawValue["ltk"] as? String {
                 self.ltk = Data(hexadecimalString: ltkString)
+            }
+            if let bleIdentifier = rawValue["bleIdentifier"] as? String {
                 self.bleIdentifier = bleIdentifier
+            }
+            // Loud, because the silence is the whole problem: a pod with a handle and no key will
+            // connect and then fail every command, and nothing downstream says why.
+            if self.ltk == nil, rawValue["ltk"] != nil {
+                os_log("PodState decode: ltk present in rawValue but did not decode — every pod command will fail", log: log, type: .error)
             }
 
             if podType.isO5 {
