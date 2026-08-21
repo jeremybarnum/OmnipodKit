@@ -788,6 +788,21 @@ class BlePodComms: PodComms {
             omnipodLogDeviceEvent("[connectOnDemand] ** ORPHANED PeripheralManager (central=nil) ** — re-adopting from the pod's handle")
             manager = nil
         }
+        // STALE MANAGER, not just orphaned manager (bench 2026-08-21 12:42). The orphan/adopt
+        // cycle REPLACES the device entry — addPeripheral logs "removed discarded pod from
+        // devices" — so didConnect is delivered to the NEW PeripheralManager while a session
+        // holding the OLD one waits on a .connect condition that can never fire and burns its
+        // full 20 s timeout. Measured: the pod was connected and configured 4 s in, while the
+        // ladder's read starved against the stale object for the whole window; that one wait is
+        // most of the ~30 s reclaim latency. The central==nil check above cannot see this case —
+        // the stale manager's central is alive and well; it is just no longer the registered one.
+        if let held = manager, let bleId = podState?.bleIdentifier,
+           let registered = bluetoothManager.peripheralManager(forIdentifier: bleId),
+           registered !== held {
+            log.default("[connectOnDemand] held PeripheralManager superseded by a re-adopt — switching to the registered one")
+            omnipodLogDeviceEvent("[connectOnDemand] ** STALE PeripheralManager ** (superseded by re-adopt) — switching before the session runs")
+            manager = registered
+        }
         if manager == nil, BluetoothManager.connectOnDemandEnabled, let bleId = podState?.bleIdentifier {
             self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
             if self.manager == nil {
