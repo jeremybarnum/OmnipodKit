@@ -69,6 +69,13 @@ class BlePodComms: PodComms {
     }
 
     func beginLoanTakeover(podId: UInt32) {
+        // Prefer a handle we already resolved for this pod on THIS device; discovery is only
+        // needed the first time. Falls through to the scan when we have none, when iOS no longer
+        // recognises it, or (on a timer, inside) when it is known but does not connect.
+        if let bleId = podState?.bleIdentifier,
+           bluetoothManager.beginLoanTakeoverUsingKnownHandle(podId: podId, uuidString: bleId) {
+            return
+        }
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
 
@@ -755,8 +762,34 @@ class BlePodComms: PodComms {
         // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
         // so configureAndRun can bootstrap the first on-demand connect. Without this, every command
         // failed with podNotConnected and the connect could never start.
+        // ORPHANED BY recreateCentral (field 2026-08-20 22:16, epoch 154). PeripheralManager
+        // holds its central WEAKLY. recreateCentral() — the watchOS escape hatch for a
+        // peripheral wedged in .connecting — swaps in a new CBCentralManager and clears
+        // `devices`, so the old central deallocates and every existing PeripheralManager's
+        // `central` silently becomes nil. We keep a STRONG reference to one of those, and the
+        // re-adopt below only ran `if manager == nil`, so an orphan was never replaced: from
+        // that moment every command threw `notReady` before issuing a connect, permanently.
+        //
+        // In the log that reads as a ladder with `adverts=0 anySeen=0` and no `[intent] connect`
+        // line at all — 14 reads, 28 s, nothing on the radio, because nothing was ever asked
+        // for. The escalation meant to clear a wedged stack is what wedged the command path.
+        //
+        // So: treat a nil central as no manager. If the device list no longer has an entry
+        // (recreateCentral emptied it), rebuild one from our cached handle first — the same
+        // handle the loan cache keeps — which is exactly what the phone does from a cold start.
+        if let existing = manager, existing.central == nil {
+            log.default("[connectOnDemand] PeripheralManager orphaned by a central recreate — re-adopting")
+            omnipodLogDeviceEvent("[connectOnDemand] ** ORPHANED PeripheralManager (central=nil) ** — re-adopting from the pod's handle")
+            manager = nil
+        }
         if manager == nil, BluetoothManager.connectOnDemandEnabled, let bleId = podState?.bleIdentifier {
             self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
+            if self.manager == nil {
+                // The device entry went with the old central; recreate it from the handle so
+                // the next line can adopt. Harmless when the entry already exists.
+                bluetoothManager.connectToDevice(uuidString: bleId)
+                self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
+            }
             if self.manager != nil {
                 log.default("[connectOnDemand] adopted PeripheralManager for %{public}@ while disconnected", bleId)
             }

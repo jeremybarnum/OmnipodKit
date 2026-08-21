@@ -583,6 +583,61 @@ class BluetoothManager: NSObject {
     /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the
     /// peripheral this device discovers (its own CoreBluetooth UUID), rather than the
     /// foreign identifier from the granted pod state.
+    /// Takeover using a handle THIS device already holds — no discovery.
+    ///
+    /// Discovery is name resolution (pod id -> local `CBPeripheral`), and it only has to happen
+    /// once per device/pod. When we have the answer cached, `retrievePeripherals` hands back the
+    /// peripheral and the ordinary connect-on-demand path takes it from there.
+    ///
+    /// Two things make this safe to prefer:
+    ///
+    /// - A handle iOS does not recognise fails IMMEDIATELY (`retrievePeripherals` returns
+    ///   empty), so a stale cache costs nothing — we fall straight through to the scan.
+    /// - A handle it DOES recognise can still be unreachable (pod out of range, dead, held by
+    ///   someone else), and a bare `connect()` has no timeout, so that case would hang forever.
+    ///   Hence the fallback timer: if we are not connected shortly, arm the scan after all. The
+    ///   fast path is an optimisation, never the only route.
+    ///
+    /// Returns true if the fast path was taken, false if the caller should scan.
+    @discardableResult
+    func beginLoanTakeoverUsingKnownHandle(podId: UInt32, uuidString: String) -> Bool {
+        guard let uuid = UUID(uuidString: uuidString),
+              let peripheral = manager.state == .poweredOn
+                ? manager.retrievePeripherals(withIdentifiers: [uuid]).first
+                : nil
+        else {
+            log.default("PODLOAN: cached handle %{public}@ not retrievable — scanning instead", uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[loan-takeover] cached handle NOT retrievable — falling back to discovery")
+            return false
+        }
+        managerQueue.async {
+            self.loanScanMarkerReason = "beginLoanTakeover(cached handle)"
+            self.loanTakeoverPodId = podId
+            self.connectionDelegate?.omnipodLogDeviceEvent(
+                "[loan-takeover] using cached handle \(uuidString) — NO SCAN (fallback armed +\(Int(Self.knownHandleFallbackSeconds))s)")
+            self.addPeripheral(peripheral, podAdvertisement: nil)
+            self.autoConnectIDs.insert(uuidString)
+            self.timedConnect(peripheral)
+            // The only thing standing between a wrong-but-known handle and an indefinite hang.
+            self.managerQueue.asyncAfter(deadline: .now() + Self.knownHandleFallbackSeconds) { [weak self] in
+                guard let self = self, self.loanTakeoverPodId == podId else { return }
+                guard peripheral.state != .connected else { return }
+                self.connectionDelegate?.omnipodLogDeviceEvent(
+                    "[loan-takeover] cached handle did not connect in \(Int(Self.knownHandleFallbackSeconds))s — arming discovery scan")
+                self.loanScanMarkerReason = "cached-handle fallback"
+                if self.manager.isScanning { self.manager.stopScan() }
+                self.startScanning()
+            }
+        }
+        return true
+    }
+
+    /// How long a cached handle gets before we fall back to discovery. Comfortably longer than a
+    /// measured connect (~1.3 s, n=4) and shorter than the takeover read ladder's first backstop.
+    static var knownHandleFallbackSeconds: TimeInterval {
+        (UserDefaults.standard.object(forKey: "OmnipodKit.knownHandleFallbackSeconds") as? Double) ?? 6
+    }
+
     func beginLoanTakeover(podId: UInt32) {
         managerQueue.async {
             self.loanScanMarkerReason = "beginLoanTakeover"
