@@ -89,6 +89,18 @@ class BlePodComms: PodComms {
     // gates on peripheral.identifier == podState.bleIdentifier) recognizes it.
     func omnipodDidAdoptLoanPod(uuidString: String) {
         log.default("PODLOAN: adopted pod bleIdentifier %{public}@", uuidString)
+        // REMEMBER IT (2026-08-20). Discovery is NAME RESOLUTION, not authentication: it
+        // translates a pod id we already know into a CoreBluetooth handle this device can
+        // use. The handle is per-device, so the phone's copy in the grant is useless here —
+        // but OUR copy is reusable for every later loan with this same pod, and the driver
+        // already knows how to use it (BlePodComms.init -> connectToDevice, and
+        // bleRunSession adopting a PeripheralManager while disconnected).
+        //
+        // Without this the watch relearns the same handle every loan and throws it away,
+        // because the pump manager is rebuilt from the phone's snapshot at each grant.
+        if let address = podState?.address {
+            PodLoanBleIdentifierCache.store(uuidString, forPodAddress: address)
+        }
         // Safe to lock here: adoption happens strictly pre-connect (didDiscover gates on
         // .disconnected), and every other podState mutator runs inside a session, which
         // requires a connected pod — so no holder can be waiting on this queue.

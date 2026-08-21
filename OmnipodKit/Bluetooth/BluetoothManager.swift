@@ -780,17 +780,33 @@ class BluetoothManager: NSObject {
     /// `isAppForeground` — i.e. no change from the validated connect-on-demand behavior. Read from
     /// managerQueue and cross-queue by PeripheralManager (benign bool race, like appIsForeground).
     var shouldHoldConnection: Bool {
-        if isAppForeground { return true }
-#if os(iOS)
-        return podType.isDash && Storage.shared.podKeepAlive.value.keepsPodConnectedInBackground
-#else
-        // watchOS: the background Pod Keep Alive modes are an iOS-only user setting — `Storage`
-        // lives in the UI layer, which the watch framework deliberately does not link. This
-        // therefore collapses to exactly `isAppForeground`, which is both the validated
-        // connect-on-demand behavior and precisely what an iPhone does with Pod Keep Alive at
-        // its `.disabled` default. A watch host that needs the link held across background
-        // holds it through its own session keep-alive, not through this setting.
+#if os(watchOS)
+        // NEVER HOLD ON THE WATCH (2026-08-20, measured). The foreground rule below is right
+        // for a phone and wrong here, for two reasons found in one evening's field test:
+        //
+        // 1. THE POD HANGS UP ON AN IDLE HELD LINK — Code=7, peripheral-initiated, every ~5 s.
+        //    A phone survives holding it only because its keep-alive constantly polls the pod;
+        //    a watch between doses sends nothing, so the pod terminates the link and we
+        //    reconnect, over and over.
+        // 2. THAT CHURN COSTS G7 ITS SLOT. Each reconnect briefly overlaps the old teardown
+        //    with a new pending connect, and G7's retries land in those windows:
+        //    CBError 11 (connection limit), sensor gone, ring orange, loop blind. Measured on
+        //    loan 149 with the hold-for-loan arm; it took ~13 minutes to bite.
+        //
+        // A phone has no CGM central competing in-process, so it can afford to hold. This
+        // watch cannot, and gains nothing by it: a bare connect resolves in ~1.3 s (n=4), so
+        // even a wrist bolus does not need a standing link.
+        //
+        // With this false, the driver's own 4 s idle-disconnect governs release, which is
+        // strictly better than the loan layer's fixed 12 s timer — it resets per session, so a
+        // status-read + dose burst shares ONE connection instead of two.
         return false
+#else
+        if isAppForeground { return true }
+        // Background Pod Keep Alive is an iOS-only user setting for phone/pod combos where a
+        // disconnect->reconnect is unreliable; the keep-alive's periodic status refresh is what
+        // makes a held link survive the pod's own idle-disconnect.
+        return podType.isDash && Storage.shared.podKeepAlive.value.keepsPodConnectedInBackground
 #endif
     }
 
@@ -1491,8 +1507,18 @@ class BluetoothManager: NSObject {
             //
             // Checked on managerQueue, where the marker is authoritative — no cross-queue race.
             if site == "connectError", self.loanTakeoverPodId != nil {
+                // ONLY CLAIM A RIDING CONNECT IF ONE EXISTS (2026-08-20). The first cut printed
+                // "LEFT RIDING" unconditionally — including for L11, where runCommand's entry guard
+                // threw before the command block ran, so no connect() was ever issued and there was
+                // nothing to protect. The guard was correct and the message was a lie: it read as
+                // "we have a bid in, waiting" when the truth was "we never tried, fourteen times".
+                // That is exactly the kind of instrument that costs an afternoon, so it now reports
+                // which of the two actually happened.
+                let riding = self.openConnectIntents.contains(peripheral.identifier.uuidString)
                 self.connectionDelegate?.omnipodLogDeviceEvent(
-                    "[connectOnDemand] connect-command error (\(detail ?? "unknown")) during armed loan reclaim — pending connect LEFT RIDING (the connect is the recovery, not the wedge)")
+                    riding
+                    ? "[connectOnDemand] connect-command error (\(detail ?? "unknown")) during armed loan reclaim — pending connect LEFT RIDING (the connect is the recovery, not the wedge)"
+                    : "[connectOnDemand] connect-command error (\(detail ?? "unknown")) during armed loan reclaim — ** NO CONNECT WAS EVER ISSUED ** (runCommand's guard threw before the command block; nothing to ride)")
                 return
             }
             self.commandConnectInFlight = false
@@ -2176,4 +2202,57 @@ extension BluetoothManager: CBCentralManagerDelegate {
             }
         }
     }
+}
+
+// MARK: - Pod-loan BLE handle cache
+
+/// Remembers THIS device's CoreBluetooth handle for a pod, keyed by the pod's advertised
+/// address.
+///
+/// Why this exists. A loan hands the watch the pod's IDENTITY — controller id, pod id, LTK —
+/// and that is all copyable. What it cannot hand over is ADDRESSABILITY: `CBPeripheral`
+/// identifiers are minted per-device, so the `bleIdentifier` inside the granted `PodState` is
+/// the PHONE's name for the pod and cannot be retrieved on the watch. That is the entire
+/// reason the takeover scan exists — it resolves a known pod id into a local handle.
+///
+/// That resolution only has to happen ONCE per (device, pod). The watch already learns the
+/// right handle on adopt; it just discards it, because the pump manager is rebuilt from the
+/// phone's snapshot at every grant. Persisting it here lets a later loan skip discovery
+/// entirely and use the driver's ordinary connect-on-demand path.
+///
+/// Correctness note: a cached handle can go stale (pod replaced, app reinstalled, the OS
+/// remapping identifiers). A stale handle does not fail loudly — `connect()` has no timeout,
+/// so it pends forever. Callers MUST keep a discovery fallback on a timer rather than trusting
+/// this blindly. See `PodLoanWatchController`.
+public enum PodLoanBleIdentifierCache {
+    private static let defaultsKey = "OmnipodKit.podLoanBleIdentifiers"
+    private static let log = OSLog(subsystem: "com.loopkit.OmnipodKit", category: "PodLoanBleIdentifierCache")
+
+    /// Pod addresses are 32-bit; hex-string keys keep the plist legible in a sysdiagnose.
+    private static func key(_ podAddress: UInt32) -> String { String(format: "%08X", podAddress) }
+
+    public static func store(_ uuidString: String, forPodAddress podAddress: UInt32) {
+        var map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+        guard map[key(podAddress)] != uuidString else { return }
+        map[key(podAddress)] = uuidString
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        os_log("stored handle %{public}@ for pod %{public}@", log: log, type: .default, uuidString, key(podAddress))
+    }
+
+    public static func identifier(forPodAddress podAddress: UInt32) -> String? {
+        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+        return map[key(podAddress)]
+    }
+
+    /// Drop one pod's handle — call when a cached handle has been proven wrong, so the next
+    /// loan pays for discovery once instead of hanging on it forever.
+    public static func forget(podAddress: UInt32) {
+        var map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+        guard map.removeValue(forKey: key(podAddress)) != nil else { return }
+        UserDefaults.standard.set(map, forKey: defaultsKey)
+        os_log("forgot handle for pod %{public}@", log: log, type: .default, key(podAddress))
+    }
+
+    /// Test seam. Not for production use.
+    public static func removeAll() { UserDefaults.standard.removeObject(forKey: defaultsKey) }
 }
