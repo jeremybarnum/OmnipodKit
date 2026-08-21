@@ -283,6 +283,14 @@ extension OmniPumpManager {
         (podComms as? BlePodComms)?.bluetoothManager?.resetAdvertCensus()
     }
 
+    /// True when THIS device already holds a CoreBluetooth handle for the pod that the system
+    /// still recognises — i.e. discovery is unnecessary and the driver's ordinary
+    /// connect-on-demand can reacquire, exactly as the phone does.
+    public var podLoanHasLocalHandle: Bool {
+        guard let comms = podComms as? BlePodComms else { return false }
+        return comms.hasResolvableLocalHandle
+    }
+
     /// True while the pod's connection is deliberately released (on loan).
     public var isConnectionReleased: Bool {
         return state.podConnectionReleased

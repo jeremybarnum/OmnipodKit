@@ -68,6 +68,12 @@ class BlePodComms: PodComms {
         return podState?.podLoanRearmInheritedTempBasal(liveTempStart: liveTempStart, liveTempEnd: liveTempEnd) != nil
     }
 
+    /// Whether this device holds a handle for the pod that CoreBluetooth still resolves.
+    var hasResolvableLocalHandle: Bool {
+        guard let bleId = podState?.bleIdentifier else { return false }
+        return bluetoothManager.canResolvePeripheral(uuidString: bleId)
+    }
+
     func beginLoanTakeover(podId: UInt32) {
         // Prefer a handle we already resolved for this pod on THIS device; discovery is only
         // needed the first time. Falls through to the scan when we have none, when iOS no longer

@@ -617,11 +617,17 @@ class BluetoothManager: NSObject {
                 "[loan-takeover] using cached handle \(uuidString) — NO SCAN (fallback armed +\(Int(Self.knownHandleFallbackSeconds))s)")
             self.addPeripheral(peripheral, podAdvertisement: nil)
             self.autoConnectIDs.insert(uuidString)
+            let resolvedAtArm = self.intentsResolved
             self.timedConnect(peripheral)
             // The only thing standing between a wrong-but-known handle and an indefinite hang.
             self.managerQueue.asyncAfter(deadline: .now() + Self.knownHandleFallbackSeconds) { [weak self] in
                 guard let self = self, self.loanTakeoverPodId == podId else { return }
-                guard peripheral.state != .connected else { return }
+                // Test whether a connect SUCCEEDED, not whether the link is up right now
+                // (2026-08-20: the first cut checked `state != .connected` and fired five seconds
+                // after a takeover that had already worked — with connect-on-demand the driver
+                // drops the link 4 s after the last command, so "not connected" is the normal
+                // resting state, and we re-armed the very scan the cached handle had just saved).
+                guard self.intentsResolved == resolvedAtArm else { return }
                 self.connectionDelegate?.omnipodLogDeviceEvent(
                     "[loan-takeover] cached handle did not connect in \(Int(Self.knownHandleFallbackSeconds))s — arming discovery scan")
                 self.loanScanMarkerReason = "cached-handle fallback"
@@ -630,6 +636,13 @@ class BluetoothManager: NSObject {
             }
         }
         return true
+    }
+
+    /// Whether CoreBluetooth still recognises this handle on THIS device. A handle it does not
+    /// know fails here immediately, which is what makes preferring the cache safe.
+    func canResolvePeripheral(uuidString: String) -> Bool {
+        guard manager.state == .poweredOn, let uuid = UUID(uuidString: uuidString) else { return false }
+        return !manager.retrievePeripherals(withIdentifiers: [uuid]).isEmpty
     }
 
     /// How long a cached handle gets before we fall back to discovery. Comfortably longer than a
