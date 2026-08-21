@@ -601,11 +601,16 @@ class BluetoothManager: NSObject {
     /// Returns true if the fast path was taken, false if the caller should scan.
     @discardableResult
     func beginLoanTakeoverUsingKnownHandle(podId: UInt32, uuidString: String) -> Bool {
-        guard let uuid = UUID(uuidString: uuidString),
-              let peripheral = manager.state == .poweredOn
-                ? manager.retrievePeripherals(withIdentifiers: [uuid]).first
-                : nil
-        else {
+        // Resolve ON the central's queue (see canResolvePeripheral): this is reached from the
+        // loan controller's queue, and touching `manager` from there is undefined behaviour.
+        let resolved: CBPeripheral? = UUID(uuidString: uuidString).flatMap { uuid in
+            managerQueue.sync {
+                self.manager.state == .poweredOn
+                    ? self.manager.retrievePeripherals(withIdentifiers: [uuid]).first
+                    : nil
+            }
+        }
+        guard let peripheral = resolved else {
             log.default("PODLOAN: cached handle %{public}@ not retrievable — scanning instead", uuidString)
             connectionDelegate?.omnipodLogDeviceEvent("[loan-takeover] cached handle NOT retrievable — falling back to discovery")
             return false
@@ -641,8 +646,14 @@ class BluetoothManager: NSObject {
     /// Whether CoreBluetooth still recognises this handle on THIS device. A handle it does not
     /// know fails here immediately, which is what makes preferring the cache safe.
     func canResolvePeripheral(uuidString: String) -> Bool {
-        guard manager.state == .poweredOn, let uuid = UUID(uuidString: uuidString) else { return false }
-        return !manager.retrievePeripherals(withIdentifiers: [uuid]).isEmpty
+        guard let uuid = UUID(uuidString: uuidString) else { return false }
+        // CoreBluetooth calls belong on the central's own queue — this is reached from the loan
+        // controller's queue, so hop, exactly as retrieveAndConnectKnownPod does. Reading
+        // `manager` itself off-queue is the same hazard as calling into it.
+        return managerQueue.sync {
+            guard self.manager.state == .poweredOn else { return false }
+            return !self.manager.retrievePeripherals(withIdentifiers: [uuid]).isEmpty
+        }
     }
 
     /// How long a cached handle gets before we fall back to discovery. Comfortably longer than a
