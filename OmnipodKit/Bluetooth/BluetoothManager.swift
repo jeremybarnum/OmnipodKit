@@ -1417,9 +1417,28 @@ class BluetoothManager: NSObject {
                 self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] takeover: continuous scan (no 4s teardown)")
                 return
             }
+            #if os(watchOS)
+            // NO SCAN ON THE WATCH — dial cold immediately (2026-08-23). The 4 s listen-first
+            // trade is PHONE physics: there a cold connect waits out iOS's duty-cycled
+            // reacquisition (10-16 s), so hearing an advert first wins. On the watch the
+            // measurement is inverted, both ways at once: the low-power scan heard ZERO adverts
+            // in 8/8 reclaim ladders (census adverts=0 across the whole idle-0 AND idle-300
+            // bench, pod at -50 dBm), while every cold connect landed in ~2.2 s. So the scan
+            // bought 4 s of guaranteed deafness before the fallback did the real work — and
+            // that 4.1 + 2.2 = 6.3 s is what pushed every read 1 just past its 6 s watchdog,
+            // making the rigid read-1-fails/read-2-succeeds pattern (~10 s reclaims, the whole
+            // residual). freshConnect directly: link ~2.2 s, read done ~5 s, watchdog silent.
+            // The wedged-.connecting flush lives in freshConnect itself, so nothing is lost.
+            self.pendingFreshConnectID = nil
+            self.log.default("[connectOnDemand] watch: cold connect immediately (scan is deaf here; see 2026-08-23 bench)")
+            self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] watch: immediate cold connect (no 4s scan)")
+            self.freshConnect(peripheral)
+            return
+            #else
             self.pendingFreshConnectID = id
             self.manager.stopScan()
             self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID], options: nil)
+            #endif
             self.log.default("[connectOnDemand] fresh-discovery scan for %{public}@", id)
             self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] fresh-discovery scan started")
             self.managerQueue.asyncAfter(deadline: .now() + 4.0) { [weak self] in
