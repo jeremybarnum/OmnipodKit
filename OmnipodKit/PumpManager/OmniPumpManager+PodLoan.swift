@@ -592,6 +592,20 @@ public enum PodLoanConnectClock {
         lock.unlock()
     }
 
+    /// The failed-takeover message branches on this. A Code-11 refusal anywhere in the attempt,
+    /// or an attempt that never once connected, is the orphaned-pending-connect signature:
+    /// CoreBluetooth connect requests are system-level and OUTLIVE the app that issued them, so
+    /// a force-quit mid-retry-storm leaves pending connects no living process can cancel — the
+    /// slots stay consumed and the radio goes blind. Field 2026-08-22, twice: takeover refused
+    /// with #11, then a second attempt that saw zero adverts in 108 s while the phone reconnected
+    /// to the same pod in 6.6 s. "Try again" WORSENS this state (each force-quit-and-retry
+    /// orphans more); a watch Bluetooth toggle flushes it — confirmed same night, first try.
+    public static var wedgeSignature: Bool {
+        lock.lock(); defer { lock.unlock() }
+        if let r = _lastReason, r.contains("#11") { return true }
+        return _connectCount == 0
+    }
+
     public static func reset() {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
