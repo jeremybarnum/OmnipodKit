@@ -161,6 +161,25 @@ class BlePodComms: PodComms {
         bluetoothManager.connectionReleasedForLoan = false
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
+            #if os(iOS)
+            // DIAL, don't just re-arm (2026-08-23). Under connect-on-demand this method issued
+            // no connect at all: connectToDevice only dials an UNKNOWN peripheral (ours is
+            // always known by reclaim time), updateConnections→autoReconnect returns
+            // immediately when connectOnDemandEnabled, and the settle's verification read is
+            // gated on isConnectionReady — so nothing dialed, and the 20 s escalation's
+            // scan-adopt was what actually connected. Every measured settle on this build:
+            // 24-28 s, pod advertising at -50 dBm the whole wait, census showing
+            // scanning=false / zero connect intents until escalation. The command path's
+            // fresh-discovery connect is the measured dial (~2-6 s cold), so issue it here
+            // and the settle finds the link up on an early tick instead.
+            // iOS ONLY: the watch's reclaim ladder is its own dialer (reads drive connects);
+            // a second in-flight connect from this seam would recreate the racing-owners bug
+            // the ladder work just removed.
+            if BluetoothManager.connectOnDemandEnabled,
+               let pm = bluetoothManager.peripheralManager(forIdentifier: bleIdentifier) {
+                bluetoothManager.connectOnDemand(pm.peripheral)
+            }
+            #endif
         }
     }
 
