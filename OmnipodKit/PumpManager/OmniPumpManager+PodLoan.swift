@@ -549,6 +549,10 @@ public enum PodLoanConnectClock {
     /// an ESTABLISHED link died (observed 2026-08-01: epoch 111's trail was 12x "x#11" and the
     /// disconnect reasons were unrecoverable). Disconnects are rare; failures are the flood.
     private static var _lastDisconnectReason: String?
+    /// When a CBErrorDomain#11 ("maximum number of connections") was last recorded, by either
+    /// a refused connect or a disconnect. Timestamped separately from the trail because the
+    /// trail entries carry no clock and the wedge test below needs "during THIS attempt".
+    private static var _lastCode11At: Date?
 
     /// Set by the app so every BLE event can record what execution state we were in when it
     /// fired. #86: the flapping and the polling deferral were BOTH only ever observed overnight,
@@ -616,9 +620,15 @@ public enum PodLoanConnectClock {
         lock.unlock()
     }
 
+    private static func isCode11(_ error: Error?) -> Bool {
+        guard let ns = error as NSError? else { return false }
+        return ns.domain == "CBErrorDomain" && ns.code == 11
+    }
+
     public static func noteDisconnect(error: Error? = nil) {
         let d = describe(error), st = stateTag()
         lock.lock()
+        if isCode11(error) { _lastCode11At = Date() }
         _lastDisconnectAt = Date(); _lastDisconnectReason = d
         _reasons.append("-\(d)@\(st)")
         if _reasons.count > 12 { _reasons.removeFirst() }
@@ -631,6 +641,7 @@ public enum PodLoanConnectClock {
     public static func noteFailToConnect(error: Error? = nil, census: String? = nil) {
         let d = describe(error), st = stateTag()
         lock.lock()
+        if isCode11(error) { _lastCode11At = Date() }
         _lastReason = d
         _lastCensus = census ?? _lastCensus
         _reasons.append("x\(d)@\(st)")
@@ -642,7 +653,44 @@ public enum PodLoanConnectClock {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
         _lastReason = nil; _reasons = []; _lastCensus = nil; _lastDisconnectReason = nil
+        _lastCode11At = nil
         lock.unlock()
+    }
+
+    // MARK: The BLE-wedge signature (2026-08-22, from the pure/SportMode line's field case)
+
+    /// The decision as a pure function, so it is testable without touching the statics.
+    ///
+    /// A takeover attempt carries the WEDGE signature when either:
+    ///  - a `CBErrorDomain#11` (connection limit) landed during the attempt — the system refused
+    ///    a slot while the pod advertised beside us; or
+    ///  - no connect EVER landed in the attempt. At takeover the pod is known-present (the phone
+    ///    was talking to it seconds ago and released it for us), so a whole attempt with zero
+    ///    didConnect is our radio's problem, not the pod's absence.
+    ///
+    /// Why the caller cares: CoreBluetooth connect requests are SYSTEM-level and outlive the app
+    /// that issued them. A force-quit mid-retry leaves pending connects no living process can
+    /// cancel; slots stay consumed and each retry round makes the radio blinder (measured on a
+    /// real user's watch: refused-with-#11 escalated to zero adverts in 108 s across retries,
+    /// while the phone reconnected to the same pod in 6.6 s; a WATCH Bluetooth toggle cleared it
+    /// first try). So on a wedge, "try again" is actively harmful advice — the remedy is the
+    /// toggle, and the failure text must say so.
+    ///
+    /// SCOPE: designed for the TAKEOVER failure path only. For reclaims mid-loan the second arm
+    /// is too loose — a quiet pod also produces zero connects — so do not surface this verdict
+    /// there; the `lastFail=` field in `summary(since:)` carries the raw evidence instead.
+    public static func isWedge(lastCode11At: Date?, lastConnectAt: Date?, since: Date) -> Bool {
+        if let c11 = lastCode11At, c11 >= since { return true }
+        let connectedThisAttempt = lastConnectAt.map { $0 >= since } ?? false
+        return !connectedThisAttempt
+    }
+
+    public static func wedgeSignature(since start: Date?) -> Bool {
+        guard let start = start else { return false }
+        lock.lock()
+        let c11 = _lastCode11At, c = _lastConnectAt
+        lock.unlock()
+        return isWedge(lastCode11At: c11, lastConnectAt: c, since: start)
     }
 
     /// Compact summary for a takeover/reclaim log line, relative to the attempt's start.

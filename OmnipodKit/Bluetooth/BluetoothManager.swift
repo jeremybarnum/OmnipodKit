@@ -2122,6 +2122,12 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        // WIRED 2026-08-22. PodLoanConnectClock was ported with noteConnect/noteDisconnect/
+        // noteFailToConnect and ZERO call sites, so every `cb:` field ever printed on this
+        // branch read "didConnect never (n=0)" structurally — the instrument existed and was
+        // never attached to the thing it measures. Any pre-2026-08-22 `cb:` field in this
+        // branch's logs is void; the intent ledger (a separate system) remains valid.
+        PodLoanConnectClock.noteConnect()
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         noteConnectClosed(peripheral, how: "resolved")
@@ -2197,6 +2203,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        PodLoanConnectClock.noteDisconnect(error: error)   // see the wiring note in didConnect
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         log.default("[#%{public}@] DISCONNECTED: %{public}@ error=%{public}@ willReconnect=%{public}@", instanceID, peripheral,
@@ -2246,6 +2253,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
         log.error("[#%{public}@] FAILED TO CONNECT: %{public}@ error=%{public}@", instanceID, peripheral, String(describing: error))
 
         noteConnectClosed(peripheral, how: "refused")
+        // see the wiring note in didConnect; the census names what THIS process held at the
+        // refusal, which is the field that separates our own storm from slots consumed elsewhere.
+        PodLoanConnectClock.noteFailToConnect(error: error, census: intentSummary)
         lastConnectFailure = (id: peripheral.identifier.uuidString,
                               code: (error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "no-error",
                               at: Date())
