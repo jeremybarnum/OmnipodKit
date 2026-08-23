@@ -177,7 +177,10 @@ class BlePodComms: PodComms {
             // the ladder work just removed.
             if BluetoothManager.connectOnDemandEnabled,
                let pm = bluetoothManager.peripheralManager(forIdentifier: bleIdentifier) {
-                bluetoothManager.connectOnDemand(pm.peripheral)
+                // skipDiscovery: the watch released this pod seconds ago, so it is advertising
+                // NOW — the 4 s listen-first window would be pure delay (measured: link-up
+                // +6.6/+8.8 s with the scan vs ~2.2 s for a bare cold connect).
+                bluetoothManager.connectOnDemand(pm.peripheral, skipDiscovery: true)
             }
             #endif
         }

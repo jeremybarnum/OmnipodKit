@@ -728,7 +728,11 @@ class BluetoothManager: NSObject {
     /// connects on demand for each session and disconnects when idle, and we alarm-scan while
     /// disconnected. Every command pays a (fast fresh-discovery) connect first.
     static var connectOnDemandEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.connectOnDemandEnabled") as? Bool ?? true
+        // SETTLED 2026-08-23 — no longer a lab toggle. Connect-on-demand won its bench trial
+        // (hold-for-loan starves G7 and the pod hangs up on idle links) and every fix since is
+        // built on it. The UserDefaults read is gone deliberately: a stale `false` persisted
+        // from an old experiment would silently revert the whole connection model.
+        return true
     }
 
     /// Low-power fault-watch: the idle scan filters on the DASH FAULT service UUID(s) — `alarmServiceUUIDs`
@@ -1497,14 +1501,17 @@ class BluetoothManager: NSObject {
     /// preempts the heartbeat probe: cancel any in-flight StartDelay probe first so its pending connect
     /// can't complete and get mis-attributed as this command connect, then mark the command in flight
     /// (so the probe won't re-arm or claim the didConnect) and connect.
-    func connectOnDemand(_ peripheral: CBPeripheral) {
+    func connectOnDemand(_ peripheral: CBPeripheral, skipDiscovery: Bool = false) {
         managerQueue.async { [weak self] in
-            self?.beginCommandConnect(peripheral)
+            self?.beginCommandConnect(peripheral, skipDiscovery: skipDiscovery)
         }
     }
 
     /// Start a command (or keep-alive) connect. Must run on managerQueue.
-    private func beginCommandConnect(_ peripheral: CBPeripheral) {
+    /// `skipDiscovery` goes straight to the flush-and-cold-connect: pass it when the pod is
+    /// KNOWN to be advertising right now (a reclaim of a pod the watch released seconds ago) —
+    /// the 4 s listen-first window is pure loss against a guaranteed-advertising pod.
+    private func beginCommandConnect(_ peripheral: CBPeripheral, skipDiscovery: Bool = false) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         if delayedProbeInFlight {
             log.default("[connectOnDemand] command preempts heartbeat probe — cancelling probe")
@@ -1520,6 +1527,12 @@ class BluetoothManager: NSObject {
         // (~10-16s — the slow user-initiated Suspend). Falls back to a cold connect after 4s if the
         // pod isn't heard. (The heartbeat probe still uses StartDelay; the two stay serialized via
         // commandConnectInFlight.)
+        if skipDiscovery {
+            log.default("[connectOnDemand] skip-discovery command connect for %{public}@", peripheral.identifier.uuidString)
+            connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] just-released pod — immediate cold connect (no 4s scan)")
+            freshConnect(peripheral)
+            return
+        }
         log.default("[connectOnDemand] fresh-discovery command connect for %{public}@", peripheral.identifier.uuidString)
         connectViaFreshDiscovery(peripheral)
     }
