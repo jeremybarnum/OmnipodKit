@@ -1767,6 +1767,50 @@ class BluetoothManager: NSObject {
         return result
     }
 
+    #if os(watchOS)
+    /// One-shot per launch (recreated centrals skip it — their predecessors are this process's
+    /// own business, and E4 no longer recreates anyway).
+    private var launchReapDone = false
+
+    /// FORCE-QUIT AS A SOLUTION (ruling 2026-08-23). CoreBluetooth connect requests live in
+    /// bluetoothd keyed to the APP, so they survive force-quit — the user's reflexive
+    /// quit-and-reopen mid-retry left orphaned pending connects silently consuming the watch's
+    /// 2-slot budget until the radio went blind (pure line, production build: refused-with-#11
+    /// escalating to ZERO adverts in 108 s across retries; a Bluetooth toggle cleared it first
+    /// try). Users cannot be trained out of force-quitting; the app must make it safe instead.
+    /// A relaunched app CAN cancel its dead predecessor's requests — bluetoothd keys them to
+    /// the app, not the process — so do it at first poweredOn.
+    ///
+    /// SCOPE: POD identifiers only, and only peripherals sitting in .connecting — a fresh
+    /// launch has issued no connects of its own yet, so any .connecting here is necessarily
+    /// the dead predecessor's. The G7 client's standing pending connect is NEVER touched:
+    /// that pending IS the piggyback acquisition mechanism (triggers a/b), and cancelling it
+    /// kills CGM — the hard boundary from the pure line's triage (POD_CONNECTION_MODEL §4.66).
+    private func launchReapOrphanedConnects(_ central: CBCentralManager) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        guard !launchReapDone else { return }
+        launchReapDone = true
+        var candidates = Set(autoConnectIDs)
+        candidates.formUnion(PodLoanBleIdentifierCache.allIdentifiers())
+        guard !candidates.isEmpty else {
+            log.default("[launch-reap] no known pod identifiers — nothing to check")
+            return
+        }
+        let uuids = candidates.compactMap(UUID.init(uuidString:))
+        let found = central.retrievePeripherals(withIdentifiers: uuids)
+        var reaped = 0
+        for peripheral in found where peripheral.state == .connecting {
+            noteConnectClosed(peripheral, how: "cancelled:launchReap")
+            central.cancelPeripheralConnection(peripheral)
+            reaped += 1
+            log.default("[launch-reap] cancelled ORPHANED pending connect %{public}@ (left by a dead process)", peripheral.identifier.uuidString)
+        }
+        connectionDelegate?.omnipodLogDeviceEvent(reaped > 0
+            ? "[launch-reap] \(reaped) orphaned pod connect(s) from a dead process CANCELLED — the slot budget is whole again"
+            : "[launch-reap] clean launch — no orphaned pod connects (\(found.count) known handle(s) checked)")
+    }
+    #endif
+
     override var debugDescription: String {
         
         var report = [
@@ -1791,6 +1835,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
         log.default("[#%{public}@] %{public}@: %{public}@", instanceID, #function, String(describing: central.state.rawValue))
 
         if case .poweredOn = central.state {
+            #if os(watchOS)
+            launchReapOrphanedConnects(central)
+            #endif
             // bluetooth may have reset; update peripheral references
             for device in devices {
                 if let newPeripheral = central.retrievePeripherals(withIdentifiers: [device.manager.peripheral.identifier]).first {
@@ -2372,6 +2419,14 @@ public enum PodLoanBleIdentifierCache {
         guard map.removeValue(forKey: key(podAddress)) != nil else { return }
         UserDefaults.standard.set(map, forKey: defaultsKey)
         os_log("forgot handle for pod %{public}@", log: log, type: .default, key(podAddress))
+    }
+
+    /// Every cached handle, for the launch reap — the durable list of pod identifiers this
+    /// app has ever connected to, which is exactly the set a dead predecessor could have left
+    /// a pending connect against.
+    public static func allIdentifiers() -> [String] {
+        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
+        return Array(map.values)
     }
 
     /// Test seam. Not for production use.
