@@ -279,10 +279,6 @@ class BluetoothManager: NSObject {
     /// Baselines so the census reports THIS ladder rather than the session. See `advertCensus`.
     private var anyDiscoveryAtCensusReset = 0
     private var heardNotAdoptedAtCensusReset = 0
-    /// The wildcard (unfiltered) probe: when it began, and the discovery count at that moment.
-    /// Read live by `advertCensus`, so the ladder's own failure line carries the verdict.
-    private var wildcardProbeStartedAt: Date?
-    private var wildcardProbeBaseline = 0
     /// When each peripheral was first seen in a non-`.disconnected` state, so the adopt gate can tell
     /// a healthy in-flight adopt from a wedged one. See the `[adopt-gate]` line.
     private var nonDisconnectedSince: [String: Date] = [:]
@@ -341,28 +337,14 @@ class BluetoothManager: NSObject {
             self.scanWatchdogRestarts += 1
             self.connectionDelegate?.omnipodLogDeviceEvent(
                 "[scan-watchdog] DEAF SCAN: isScanning=true but no didDiscover of ANYTHING for \(Int(age))s while scanning — stopScan + fresh arm (restart #\(self.scanWatchdogRestarts), \(restartsThisArm + 1)/3 this arm, filter=\((restartsThisArm + 1) % 2 == 1 ? "WILDCARD probe" : "pod service"))")
-            // WILDCARD PROBE (2026-08-20). A filtered scan cannot tell us whether the radio is
-            // receiving: didDiscover only fires for peripherals advertising the pod service, so a deaf
-            // central and a pod whose frames never match look the same from inside. Every odd restart
-            // therefore re-arms with NO service filter. Hearing anything at all proves the central is
-            // receiving, which moves the fault to the frames or the filter and takes deafness off the
-            // table; hearing nothing unfiltered, in a room with any BLE traffic in it, is deafness
-            // demonstrated rather than inferred.
-            //
-            // It is not only a probe. A wildcard scan is a strict SUPERSET of the filtered one — the
-            // adopt path matches the address out of the parsed advertisement and does not care which
-            // filter surfaced it — so if the service filter is itself wrong for this pod, the wildcard
-            // arm discovers it and the takeover recovers. Diagnostic and candidate fix in one.
+            // (The WILDCARD PROBE that alternated here was DELETED in the 2026-08-24 lean pass:
+            // it existed to arbitrate "deaf central vs wrong filter" and that mystery is solved —
+            // the deafness was our own takeover-scan filtering, and no session since has scored
+            // it. The restart below is the REMEDY half and stays: stopScan + fresh filtered arm
+            // is correct under every theory, and each firing is still logged.)
             restartsThisArm += 1
-            let wildcard = restartsThisArm % 2 == 1
-            if wildcard {
-                self.wildcardProbeBaseline = self.anyDiscoveryCount
-                self.wildcardProbeStartedAt = Date()
-            } else {
-                self.wildcardProbeStartedAt = nil
-            }
             self.manager.stopScan()
-            self.manager.scanForPeripherals(withServices: wildcard ? nil : [self.podScanServiceUUID],
+            self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID],
                                             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         }
         t.resume()
@@ -400,17 +382,13 @@ class BluetoothManager: NSObject {
         // `anySeen=0` is DELIBERATELY NOT read as deafness. The takeover scan is FILTERED on the pod's
         // service UUID with allowDuplicates, so the only thing that can raise didDiscover at all is a
         // pod — which makes "the central is deaf" and "our pod's frames are not arriving/matching"
-        // produce an identical anySeen=0. Separating those needs an UNFILTERED scan, which is what the
-        // watchdog's wildcard probe runs; `wildcard=heard/elapsed` below is that answer, and it is the
-        // only term here that can speak to deafness.
+        // produce an identical anySeen=0. (The wildcard probe that once arbitrated those was
+        // deleted in the 2026-08-24 lean pass — the mystery it existed for is solved.)
         // `skipped` is the adopt gate's own count over the same window, so a ladder that heard the pod
         // and refused to adopt it says so on the line that declares the failure.
         let anySeen = anyDiscoveryCount - anyDiscoveryAtCensusReset
         let skipped = podHeardButNotAdopted - heardNotAdoptedAtCensusReset
-        let probe = wildcardProbeStartedAt.map {
-            String(format: " wildcard=%d/%.0fs", anyDiscoveryCount - wildcardProbeBaseline, -$0.timeIntervalSinceNow)
-        } ?? ""
-        return "adverts=\(ownPodAdvertsSeen) anySeen=\(anySeen) skipped=\(skipped)\(probe) "
+        return "adverts=\(ownPodAdvertsSeen) anySeen=\(anySeen) skipped=\(skipped) "
             + "last=\(age) rssi=\(ownPodAdvertLastRSSI.map(String.init) ?? "-") gap=\(gap)"
     }
 
@@ -422,9 +400,6 @@ class BluetoothManager: NSObject {
             self.ownPodAdvertLastRSSI = nil
             self.anyDiscoveryAtCensusReset = self.anyDiscoveryCount
             self.heardNotAdoptedAtCensusReset = self.podHeardButNotAdopted
-            // Per-ladder, like everything else here — a probe left over from the LAST ladder would
-            // print `wildcard=0/900s` against this one and read as a fresh negative result.
-            self.wildcardProbeStartedAt = nil
         }
     }
 
@@ -1718,7 +1693,6 @@ class BluetoothManager: NSObject {
     private func stopScanning() {
         log.default("Stop scanning")
         loanScanWatchdog?.cancel(); loanScanWatchdog = nil
-        wildcardProbeStartedAt = nil
         manager.stopScan()
     }
 
