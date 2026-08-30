@@ -76,6 +76,13 @@ extension OmniPumpManager {
         return state.podState?.lastInsulinMeasurements?.delivered
     }
 
+    /// When `podLoanInsulinDelivered` was actually read off the pod (the status response's
+    /// validTime). The pair (delivered, asOf) is what makes a mid-loan odometer reading a
+    /// checkpoint the phone's audit can anchor to.
+    public var podLoanInsulinDeliveredAt: Date? {
+        return state.podState?.lastInsulinMeasurements?.validTime
+    }
+
     /// True while a pod fault is active — rides StatusReport.podFault (spec §6).
     public var podLoanFaultDescription: String? {
         guard let fault = state.podState?.fault else { return nil }
