@@ -121,8 +121,10 @@ public class OmniPumpManager: RileyLinkPumpManager {
 
         // PODLOAN: honor a persisted mid-loan release. BlePodComms auto-connects at
         // construction from podState.bleIdentifier; a relaunch during a loan must not
-        // steal the pod back from the watch, so disarm immediately.
+        // steal the pod back from the watch, so disarm immediately — and arm the
+        // interlock mirror, so every connect path stays refused until reclaim.
         if state.podConnectionReleased {
+            (podComms as? BlePodComms)?.loanConnectionReleasedForBle = true
             (podComms as? BlePodComms)?.releaseConnection()
         }
     }

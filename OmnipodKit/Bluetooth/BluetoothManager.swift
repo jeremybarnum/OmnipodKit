@@ -298,9 +298,55 @@ class BluetoothManager: NSObject {
             {
                 self.log.default("connectToDevice: retrieved peripheral %{public}@ via retrievePeripherals", uuidString)
                 self.addPeripheral(peripheral, podAdvertisement: nil)
-                self.manager.connect(peripheral, options: nil)
+                self.loanGuardedConnect(self.manager, peripheral, via: "connectToDevice")
             }
         }
+    }
+
+    // MARK: - The loan interlock (ported from next-dev 11ce454 by intent, 2026-08-30)
+
+    /// Mirrors OmniPumpManagerState.podConnectionReleased down into the BLE layer, where the
+    /// connects actually happen. Set true by releaseConnection()/podLoanOrphanConnection(),
+    /// false FIRST by reclaimConnection() and escalateLoanReclaim() (every path that
+    /// legitimately wants the pod back clears it before connecting — so the interlock can
+    /// refuse a contending connect and never a recovery), and restored at construction for a
+    /// relaunch mid-loan. Port-line evidence (H5, 2026-08-19): the phone connected to a lent
+    /// pod every 2-3 minutes with released=true throughout; a pod in a connection does not
+    /// advertise, so the watch's ladders heard nothing — phone ON: 0/13 ladders succeeded,
+    /// phone OFF: 7/9. Isolation used to be indirect (empty autoConnectIDs); this is the
+    /// flag, enforced at every connect site.
+    var connectionReleasedForLoan: Bool = false
+
+    /// Which callers tried to connect to a lent pod, and how often. Surfaced through
+    /// podLoanBleContentionDiagnostics so the phone's loan controller can log it to a
+    /// READABLE log — the port-line lesson: the alarm alone went to LoopKit's device-comms
+    /// store, unreadable on the phone, and the mechanism stayed unidentified for two days
+    /// despite being instrumented.
+    private var blockedWhileLoaned: [String: Int] = [:]
+
+    var blockedSummary: String {
+        blockedWhileLoaned.isEmpty ? "whileLoaned=none"
+            : "whileLoaned=" + blockedWhileLoaned.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",")
+    }
+
+    /// The interlock, on by default. Off restores log-only behavior (still connects) —
+    /// reversible without a rebuild.
+    static var loanInterlockEnabled: Bool {
+        UserDefaults.standard.object(forKey: "OmnipodKit.loanInterlockEnabled") as? Bool ?? true
+    }
+
+    /// The one choke point every pod connect goes through. Returns false (and logs, and
+    /// counts) when the connect would contend with a loan.
+    @discardableResult
+    private func loanGuardedConnect(_ central: CBCentralManager, _ peripheral: CBPeripheral, via: String) -> Bool {
+        if connectionReleasedForLoan {
+            blockedWhileLoaned[via, default: 0] += 1
+            PodLoanConnectClock.podLoanLog("[intent] ** CONNECT WHILE ON LOAN ** via \(via) — \(Self.loanInterlockEnabled ? "REFUSED" : "allowed (interlock off)") · \(blockedSummary)")
+            log.error("CONNECT WHILE ON LOAN via %{public}@ — %{public}@", via, Self.loanInterlockEnabled ? "REFUSED" : "allowed (interlock off)")
+            if Self.loanInterlockEnabled { return false }
+        }
+        central.connect(peripheral, options: nil)
+        return true
     }
 
     /// Retrieve a known peripheral by UUID (without scanning), add it to devices, and initiate connection.
@@ -316,7 +362,7 @@ class BluetoothManager: NSObject {
             }
             let device = addPeripheral(peripheral, podAdvertisement: nil)
             autoConnectIDs.insert(uuidString)
-            manager.connect(peripheral, options: nil)
+            loanGuardedConnect(manager, peripheral, via: "retrieveKnownPod")
             log.default("retrieveAndConnectKnownPod: initiating connection to %{public}@", peripheral)
             result = device
         }
@@ -340,7 +386,7 @@ class BluetoothManager: NSObject {
             if autoConnectIDs.contains(peripheral.identifier.uuidString) {
                 if peripheral.state == .disconnected || peripheral.state == .disconnecting {
                     log.info("updateConnections: Connecting to peripheral: %{public}@", peripheral)
-                    manager.connect(peripheral, options: nil)
+                    loanGuardedConnect(manager, peripheral, via: "updateConnections")
                 }
             } else {
                 switch peripheral.state {
@@ -388,7 +434,7 @@ class BluetoothManager: NSObject {
             let peripheral = device.manager.peripheral
             if peripheral.state == .disconnected || peripheral.state == .disconnecting {
                 log.info("discoverPods: Connecting to peripheral: %{public}@", peripheral)
-                manager.connect(peripheral, options: nil)
+                loanGuardedConnect(manager, peripheral, via: "discoverPods")
             }
         }
         startScanning()
@@ -470,7 +516,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 {
                     log.default("Recovered peripheral from autoConnectIDs: %{public}@", uuidString)
                     addPeripheral(peripheral, podAdvertisement: nil)
-                    central.connect(peripheral, options: nil)
+                    loanGuardedConnect(central, peripheral, via: "poweredOn-recover")
                 }
             }
 

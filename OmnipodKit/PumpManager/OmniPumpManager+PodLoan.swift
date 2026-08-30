@@ -319,6 +319,8 @@ extension OmniPumpManager {
     /// persisted across relaunches. Reverse: reclaimConnection().
     public func releaseConnection() {
         let handedOverAt = Date()
+        // Interlock mirror FIRST: no window where an auto-reconnect path races the drop.
+        (podComms as? BlePodComms)?.loanConnectionReleasedForBle = true
         setState { (state) in
             state.podConnectionReleased = true
             // C5 (loan-boundary accounting, R2): close this phone's RECORD of a running
@@ -345,6 +347,7 @@ extension OmniPumpManager {
     /// the release stamp — killing live IOB tracking ~90s after takeover and quietly
     /// under-booking long-running temps under NO-CHANGE verdicts.
     public func podLoanOrphanConnection() {
+        (podComms as? BlePodComms)?.loanConnectionReleasedForBle = true
         setState { (state) in
             state.podConnectionReleased = true
         }
@@ -355,10 +358,22 @@ extension OmniPumpManager {
     /// connect re-arms; the session re-establishes on next contact and the next
     /// status poll resynchronizes state.
     public func reclaimConnection() {
+        // Interlock mirror cleared FIRST — reclaiming is the owner asserting the pod back,
+        // and the guard must never refuse a recovery (port-line safety note, 11ce454).
+        (podComms as? BlePodComms)?.loanConnectionReleasedForBle = false
         setState { (state) in
             state.podConnectionReleased = false
         }
         (podComms as? BlePodComms)?.rearmConnection()
+    }
+
+    /// The interlock's census, phone-readable: which callers tried to connect to a lent pod
+    /// and how often (whileLoaned=none when clean). The port-line lesson behind surfacing it
+    /// here: the refusal alarm alone landed in a log unreadable on the phone, and the H5
+    /// mechanism stayed unidentified for two days despite being instrumented. The loan
+    /// controller logs this at its existing diagnostic moments.
+    public var podLoanBleContentionDiagnostics: String {
+        (podComms as? BlePodComms)?.loanBleContentionSummary ?? "whileLoaned=n/a"
     }
 
     private static func podLoanKind(of pending: PendingCommand) -> PodLoanPendingKind {

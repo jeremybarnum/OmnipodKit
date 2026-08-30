@@ -70,10 +70,23 @@ class BlePodComms: PodComms {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
 
+    // PODLOAN: the loan interlock's mirror switch and its census, surfaced for the pump
+    // manager on BOTH platforms (bluetoothManager itself stays private to this class).
+    var loanConnectionReleasedForBle: Bool {
+        get { bluetoothManager.connectionReleasedForLoan }
+        set { bluetoothManager.connectionReleasedForLoan = newValue }
+    }
+    var loanBleContentionSummary: String { bluetoothManager.blockedSummary }
+
 #if os(watchOS)
     // PODLOAN E4 (157): escalate a stalled reclaim to the takeover-grade recovery —
     // fresh central + address scan-adopt. See BluetoothManager.escalateLoanReclaim.
     func escalateLoanReclaim(podId: UInt32) {
+        // Escalating IS the owner asserting the pod back, so it must clear the loan
+        // interlock or the escape hatch would be refused by the very guard meant to protect
+        // the loan — without this line a stranded pod could not be recovered (port-line
+        // safety note, 11ce454).
+        loanConnectionReleasedForBle = false
         bluetoothManager.escalateLoanReclaim(podId: podId)
     }
 #endif
