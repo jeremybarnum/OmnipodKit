@@ -377,6 +377,12 @@ extension OmniPumpManager {
         (podComms as? BlePodComms)?.lastSqnResync.map { ($0.at, max(0, $0.pods - $0.ours)) }
     }
 
+    /// PumpConnectionLendable's books-dirty primitive (phone mirror, R40(a)): the SQN
+    /// resync stamp, protocol-shaped so Loop reads it without importing OmnipodKit.
+    public var podLoanLastForeignSessionAt: Date? {
+        podLoanLastSqnResync?.at
+    }
+
     /// The interlock's census, phone-readable: which callers tried to connect to a lent pod
     /// and how often (whileLoaned=none when clean). The port-line lesson behind surfacing it
     /// here: the refusal alarm alone landed in a log unreadable on the phone, and the H5
