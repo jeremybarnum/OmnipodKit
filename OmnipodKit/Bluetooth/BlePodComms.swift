@@ -85,6 +85,13 @@ class BlePodComms: PodComms {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
 
+    /// The most recent EAP SQN resynchronization — the pod's session counter found ahead of
+    /// ours, i.e. evidence another controller established sessions since our last contact.
+    /// Written under podStateLock in establishSession; nil until the first resync this
+    /// process. The seize / wake-resume ladders read this through the pump manager's
+    /// podLoanLastSqnResync (seize prerequisite 2).
+    private(set) var lastSqnResync: (at: Date, ours: Int, pods: Int)?
+
     // PODLOAN E4 (157): escalate a stalled reclaim to the takeover-grade recovery — address
     // scan-adopt, plus a fresh central on watchOS. Ungated: the phone reclaims too (hand-back
     // settle, grant-lost, escape hatch) and was measured at 224s on the bare pending-connect.
@@ -422,9 +429,23 @@ class BlePodComms: PodComms {
         case .SessionNegotiationResynchronization(let keys):
             log.bleDebug("@@@ Received EAP SQN resynchronization: %@", keys.synchronizedEapSqn.data.hexadecimalString)
             if podState != nil {
-                let eapSeq = keys.synchronizedEapSqn.toInt()
-                log.bleDebug("@@@ Updating EAP SQN to: %d", eapSeq)
-                podState!.bleMessageTransportState.eapSeq = eapSeq
+                let podSqn = keys.synchronizedEapSqn.toInt()
+                log.bleDebug("@@@ Updating EAP SQN to: %d", podSqn)
+                // THE TRUST SIGNAL (seize prerequisite 2, 2026-08-30). An SQN resync means the
+                // pod's session counter is ahead of ours: every session establishment
+                // increments it, so the delta counts sessions made by a controller that was
+                // not us since our last contact. During an ordinary loan that controller is
+                // the WATCH (expected — the phone resyncs at every reclaim); for the seize /
+                // wake-resume ladders this same line is the fingerprint that answers "did
+                // someone else run this pod while I was dark". Surfaced here because the
+                // transport used to swallow it in bleDebug, invisible in field logs; the
+                // ladder-facing accessor is podLoanLastSqnResync. Greppable: [sqn-resync].
+                let delta = podSqn - eapSeq
+                lastSqnResync = (at: Date(), ours: eapSeq, pods: podSqn)
+                PodLoanConnectClock.podLoanLog(String(format:
+                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): %d session(s) by another controller since our last contact [sqn-resync]",
+                    podSqn, eapSeq, delta, max(0, delta)))
+                podState!.bleMessageTransportState.eapSeq = podSqn
             }
             return nil
         case .SessionKeys(let keys):

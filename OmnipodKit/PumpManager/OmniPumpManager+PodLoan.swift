@@ -408,6 +408,22 @@ extension OmniPumpManager {
         (podComms as? BlePodComms)?.rearmConnection()
     }
 
+    /// The most recent EAP SQN resync as (when, how many sessions another controller made
+    /// since our last contact) — the trust-chain fingerprint the seize and wake-resume
+    /// ladders key on ("did someone else run this pod while I was dark"). nil = no resync
+    /// this process. During ordinary loans the "other controller" is the expected one:
+    /// the watch (from the phone's view) at reclaim, the phone (from the watch's view)
+    /// at takeover — interpretation belongs to the caller, this is the primitive.
+    public var podLoanLastSqnResync: (at: Date, foreignSessions: Int)? {
+        (podComms as? BlePodComms)?.lastSqnResync.map { ($0.at, max(0, $0.pods - $0.ours)) }
+    }
+
+    /// PumpConnectionLendable's books-dirty primitive (phone mirror, R40(a)): the SQN
+    /// resync stamp, protocol-shaped so Loop reads it without importing OmnipodKit.
+    public var podLoanLastForeignSessionAt: Date? {
+        podLoanLastSqnResync?.at
+    }
+
     private static func podLoanKind(of pending: PendingCommand) -> PodLoanPendingKind {
         switch pending {
         case .program(let program, _, _, _):
