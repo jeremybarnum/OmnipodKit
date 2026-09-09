@@ -717,7 +717,30 @@ class BluetoothManager: NSObject {
     /// wakes otherwise. Alerts (no service-UUID change) are NOT caught here — the heartbeat probe surfaces
     /// those. Coexists with the StartDelay heartbeat probe. See DASH_BEACON_FINDINGS.md.
     static var lowPowerMonitorEnabled: Bool {
-        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
+        // DEFAULT OFF ON watchOS (Jeremy, 2026-09-09 02:20, after three preregistered runs).
+        //
+        // This idle scan arms on every pod disconnect — which on the watch is inside the G7
+        // sensor's post-burst tail — and it is what turns a survivable connect retry into
+        // bluetoothd's -70 dBm floor (the "G7 mute"). Same recipe three times, judgment already
+        // at 1, phone fully cut off: with this scan ON the daemon's second retry COMPLETED a
+        // connection to a sensor that had already stopped, scored it, and parked minRSSI=-70
+        // (00:52:08, 01:17:14 — wedged both times, next bursts advertised 25 s with nobody
+        // asking). With it OFF the identical retry churn on the air scored nothing past the
+        // fast scan, wrote -100, and the next burst connected (01:50 run). Best-fit mechanism:
+        // our scan raises the radio's scan duty cycle enough for the controller to catch the
+        // sensor's last advertisements and complete a doomed link. Full record: the G7 mute
+        // investigation doc on reclaim-lean-bench-pm, and the port memory.
+        //
+        // Cost: connectionless pod-fault detection (~1 min) becomes detection at the next
+        // cycle's connect. Alerts are unaffected (they never changed the advertised UUID).
+        // The iOS default is untouched — the phone's bluetoothd was never implicated.
+        // Still read at use, so the diagnostics-screen toggle and a shell default both work.
+        #if os(watchOS)
+        let shippedDefault = false
+        #else
+        let shippedDefault = true
+        #endif
+        return UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? shippedDefault
     }
 
     /// Master switch for the IDLE scan (startScanning). ON = run the C00A fault listener while
