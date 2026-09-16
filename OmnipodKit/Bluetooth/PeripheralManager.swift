@@ -156,54 +156,26 @@ extension PeripheralManager {
                 self.log.error("Configured peripheral has no services. Reconfiguring %{public}@", self.peripheral)
             }
 
-            // #86 (2026-08-03): say which branch ran. Without this the whole BLE layer is dark
-            // in the field log, and "the pod hung up" cannot be told apart from "we never spoke".
-            // The distinction decides the fix: silence means the session guard bailed (stale
-            // cross-queue peripheral.state); a completed handshake followed by a drop means the
-            // protocol or keys. Three review rounds could not settle that from the logs alone.
-            let willConfigure = self.needsConfiguration || self.peripheral.services == nil
-            PodLoanConnectClock.podLoanLog("[CONFIG] configure branch \(willConfigure ? "RUNNING" : "SKIPPED") · needsConfiguration=\(self.needsConfiguration) servicesNil=\(self.peripheral.services == nil)")
-            self.log.error("[CONFIG] configure branch %{public}@: needsConfiguration=%{public}@ servicesNil=%{public}@",
-                           willConfigure ? "RUNNING" : "SKIPPED",
-                           String(describing: self.needsConfiguration),
-                           String(describing: self.peripheral.services == nil))
-            if willConfigure {
+            if self.needsConfiguration || self.peripheral.services == nil {
                 do {
                     self.log.bleDebug("Applying configuration")
                     try self.applyConfiguration()
-                    // #86 (2026-08-03): DO NOT clear needsConfiguration here.
-                    //
-                    // It used to be cleared at this point, BEFORE completeConfiguration ran —
-                    // and completeConfiguration (BlePodComms) catches its own error rather than
-                    // rethrowing. So a failed sendHello / enableNotifications /
-                    // establishNewSession left needsConfiguration false with services non-nil,
-                    // and EVERY later reconnect skipped this branch entirely: never re-sent
-                    // hello, never re-established the session. The pod then hung up on each
-                    // silent link after its ~3.5 s idle timeout, forever.
-                    //
-                    // Field 2026-08-03 epoch 151: eleven connects in sixty seconds, no session
-                    // ever established, takeover failed at 113 s. Epoch 152 recovered only at
-                    // +94 s, consistent with an occasional rediscovery re-arming the flag.
-                    //
-                    // Clearing it only after the delegate returns means a failed handshake
-                    // leaves the manager ARMED to reconfigure on the next connect, which is the
-                    // behaviour the retry loop has always assumed it had.
+#if !os(watchOS)
+                    self.needsConfiguration = false
+#endif
+
                     if let delegate = self.delegate {
                         try delegate.completeConfiguration(for: self)
                         self.log.bleDebug("Delegate configuration notified")
-                        PodLoanConnectClock.podLoanLog("[CONFIG] completeConfiguration RETURNED cleanly — session should be live")
                     }
+#if os(watchOS)
+                    // #86 (2026-08-03): cleared only after the handshake returned, so a failed
+                    // hello/session leaves the manager armed to reconfigure on the next connect.
                     self.needsConfiguration = false
+#endif
 
                     self.log.bleDebug("Peripheral configuration completed")
                 } catch let error {
-                    // #86 (2026-08-03): name the failure. The [CONFIG] evidence from build 215
-                    // showed the configure branch RUNNING eight times and "RETURNED cleanly" only
-                    // once — and since completeConfiguration swallows its own error and returns
-                    // normally, the other seven must have thrown HERE, in applyConfiguration
-                    // (service/characteristic discovery), not in the session handshake. Which of
-                    // the two it is changes the fix entirely, so stop inferring it.
-                    PodLoanConnectClock.podLoanLog("[CONFIG] configure FAILED (applyConfiguration or delegate threw): \(error)")
                     self.log.error("Error applying peripheral configuration: %{public}@", String(describing: error))
                     // Will retry
                 }
@@ -624,12 +596,9 @@ extension PeripheralManager {
                   String(describing: error), peripheral)
         self.queue.async {
             self.idleStart = nil
-            // #86: a dropped link invalidates the session that was established over it, so the
-            // next connect must reconfigure. Without this, `peripheral.services` stays non-nil
-            // across the reconnect and the configure branch is skipped — the second half of the
-            // latch described above. BlePodComms already sets needsSessionEstablishment on every
-            // didConnect, so the handshake work was always intended to re-run here.
-            self.needsConfiguration = true
+#if os(watchOS)
+            self.needsConfiguration = true   // #86: a dropped link invalidates the session established over it
+#endif
         }
     }
 

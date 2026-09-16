@@ -100,11 +100,6 @@ class BlePodComms: PodComms {
     // scan-adopt, plus a fresh central on watchOS. Ungated: the phone reclaims too (hand-back
     // settle, grant-lost, escape hatch) and was measured at 224s on the bare pending-connect.
     func escalateLoanReclaim(podId: UInt32) {
-        // Escalating IS the owner asserting the pod back, so it must clear the loan interlock or the
-        // escape hatch would be refused by the very guard meant to protect the loan. The PHONE reaches
-        // here via escalateConnectionReclaim(), which (unlike reclaimConnection) does NOT set
-        // podConnectionReleased = false -- so without this line a stranded pod could not be recovered.
-        bluetoothManager.connectionReleasedForLoan = false
         bluetoothManager.escalateLoanReclaim(podId: podId)
     }
 
@@ -154,10 +149,6 @@ class BlePodComms: PodComms {
         } else {
             log.error("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
         }
-        // Tell the BLE layer a loan is on. Diagnostics only -- nothing branches on it -- but until now
-        // OmnipodKit had NO concept of a loan, so a connect arriving from any path that does not consult
-        // autoConnectIDs/devices was invisible. See the CONNECT WHILE ON LOAN alarm.
-        bluetoothManager.connectionReleasedForLoan = true
         // PODLOAN E4 (157): a reclaim escalation may have armed the takeover-grade scan;
         // releasing the pod ends the bid entirely, so the scan must not outlive it and
         // contend with the G7 window. No-op when nothing is armed. Ungated with the
@@ -169,7 +160,6 @@ class BlePodComms: PodComms {
     // peripheral via retrievePeripherals and connects; the session re-establishes
     // on next contact (pod-side EAP resynchronization).
     func rearmConnection() {
-        bluetoothManager.connectionReleasedForLoan = false
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
             #if os(iOS)
@@ -821,6 +811,7 @@ class BlePodComms: PodComms {
         // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
         // so configureAndRun can bootstrap the first on-demand connect. Without this, every command
         // failed with podNotConnected and the connect could never start.
+#if os(watchOS)
         // ORPHANED BY recreateCentral (field 2026-08-20 22:16, epoch 154). PeripheralManager
         // holds its central WEAKLY. recreateCentral() — the watchOS escape hatch for a
         // peripheral wedged in .connecting — swaps in a new CBCentralManager and clears
@@ -841,6 +832,7 @@ class BlePodComms: PodComms {
             omnipodLogDeviceEvent("[connectOnDemand] ** ORPHANED PeripheralManager (central=nil) ** — re-adopting from the pod's handle")
             manager = nil
         }
+#endif
         // STALE MANAGER, not just orphaned manager (bench 2026-08-21 12:42). The orphan/adopt
         // cycle REPLACES the device entry — addPeripheral logs "removed discarded pod from
         // devices" — so didConnect is delivered to the NEW PeripheralManager while a session
@@ -858,12 +850,14 @@ class BlePodComms: PodComms {
         }
         if manager == nil, BluetoothManager.connectOnDemandEnabled, let bleId = podState?.bleIdentifier {
             self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
+#if os(watchOS)
             if self.manager == nil {
                 // The device entry went with the old central; recreate it from the handle so
                 // the next line can adopt. Harmless when the entry already exists.
                 bluetoothManager.connectToDevice(uuidString: bleId)
                 self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
             }
+#endif
             if self.manager != nil {
                 log.default("[connectOnDemand] adopted PeripheralManager for %{public}@ while disconnected", bleId)
             }

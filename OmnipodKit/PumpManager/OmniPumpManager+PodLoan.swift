@@ -273,22 +273,12 @@ extension OmniPumpManager {
         guard let address = state.podState?.address else {
             return "no pod address on this phone — nothing to escalate"
         }
+        // Escalating IS the owner asserting the pod back: lift the session gate before dialling.
+        setState { $0.podConnectionReleased = false }
         podLoanEscalateReclaim()
         return String(format: "scan-adopt armed for pod 0x%X", address)
     }
 
-
-    /// Per-ladder advert census: what the RADIO heard, as against what we tried. The decisive gap on
-    /// 2026-08-19 -- every FAILED ladder issued zero connects because no advertisement ever arrived, and
-    /// the log could not distinguish "heard the pod and could not connect" from "never heard the pod".
-    public var podLoanAdvertCensus: String {
-        (podComms as? BlePodComms)?.bluetoothManager?.advertCensus ?? "adverts=? (no ble)"
-    }
-
-    /// Zero the census so the count is per-ladder. Call at ladder start.
-    public func podLoanResetAdvertCensus() {
-        (podComms as? BlePodComms)?.bluetoothManager?.resetAdvertCensus()
-    }
 
     /// True when THIS device already holds a CoreBluetooth handle for the pod that the system
     /// still recognises — i.e. discovery is unnecessary and the driver's ordinary
