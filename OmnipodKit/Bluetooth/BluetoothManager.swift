@@ -1424,6 +1424,11 @@ class BluetoothManager: NSObject {
     private func enterForeground() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         isAppForeground = true
+        // A pre-connect is only worth issuing where the link will then be HELD. On the phone that is
+        // every foregrounding (shouldHoldConnection is true there); on the watch it never is, so the
+        // idle disconnect would drop the pre-connected link ~4 s later and the next wrist-raise would
+        // repeat it — measured 2026-09-16 07:23–07:27, a connect/disconnect pair every 10–20 s.
+        guard shouldHoldConnection else { return }
         guard let peripheral = keepAlivePeripheral else { return }
         switch peripheral.state {
         case .connected, .disconnecting:
