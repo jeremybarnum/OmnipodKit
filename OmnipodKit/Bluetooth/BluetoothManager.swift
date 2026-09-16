@@ -226,17 +226,14 @@ class BluetoothManager: NSObject {
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
 
-    /// Whether CoreBluetooth still recognises this handle on THIS device. A handle it does not
-    /// know fails here immediately, which is what makes preferring the cache safe.
-    func canResolvePeripheral(uuidString: String) -> Bool {
-        guard let uuid = UUID(uuidString: uuidString) else { return false }
-        // CoreBluetooth calls belong on the central's own queue — this is reached from the loan
-        // controller's queue, so hop, exactly as retrieveAndConnectKnownPod does. Reading
-        // `manager` itself off-queue is the same hazard as calling into it.
-        return managerQueue.sync {
-            guard self.manager.state == .poweredOn else { return false }
-            return !self.manager.retrievePeripherals(withIdentifiers: [uuid]).isEmpty
-        }
+    /// PODLOAN: drop the pod link on purpose so another controller can take it. Clears the
+    /// command-connect marker first, exactly as the deliberate idle disconnect does, so
+    /// didDisconnect reads the cancel as intended and the foreground keep-alive does not
+    /// reconnect into the borrower's loan (measured 2026-09-16 09:17 with Loop open on the phone:
+    /// the phone re-linked within 3 s of releasing and held the pod for the whole loan).
+    func releaseConnectionForLoan(uuidString: String) {
+        managerQueue.async { self.commandConnectInFlight = false }
+        disconnectFromDevice(uuidString: uuidString)
     }
 
     /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the

@@ -55,14 +55,10 @@ class BlePodComms: PodComms {
     // PODLOAN: adopt a pod paired by ANOTHER device (a loan takeover) by scanning for
     // its advertised address, since the granted pod state's bleIdentifier is a foreign
     // per-device CoreBluetooth UUID that this device can't retrieve.
+    // Only for a pod this device has never adopted: with a handle of our own in podState the
+    // driver's normal path applies (connectToDevice at init, recovery at poweredOn, the first
+    // read's connect-on-demand dial) and nothing is armed here — the caller decides.
     func beginLoanTakeover(podId: UInt32) {
-        // A handle THIS device resolved before (the app patched it into podState at grant) needs
-        // no discovery and no second dialer: the driver's own connect-on-demand dials it on the
-        // first status read. Discovery is only for a pod this device has never adopted.
-        if let bleId = podState?.bleIdentifier, bluetoothManager.canResolvePeripheral(uuidString: bleId) {
-            log.default("PODLOAN: cached handle %{public}@ resolves — no takeover scan; the first read dials", bleId)
-            return
-        }
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
 
@@ -122,7 +118,7 @@ class BlePodComms: PodComms {
         // waits on a link nobody is holding. Log which way it went.
         if let bleIdentifier = podState?.bleIdentifier {
             log.default("PODLOAN: releaseConnection -> disconnect %{public}@", bleIdentifier)
-            bluetoothManager.disconnectFromDevice(uuidString: bleIdentifier)
+            bluetoothManager.releaseConnectionForLoan(uuidString: bleIdentifier)
         } else {
             log.error("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
         }

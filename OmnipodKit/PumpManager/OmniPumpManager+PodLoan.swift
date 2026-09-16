@@ -90,15 +90,19 @@ extension OmniPumpManager {
     }
 
     /// PODLOAN: begin a cross-device loan takeover. Call once, right after constructing the
-    /// manager from the grant, before reading status. Returns false if there's no pod address.
+    /// manager from the grant, before reading status. `discover` arms the scan-adopt for a pod
+    /// this device holds no CoreBluetooth handle for; with a handle of its own already in the
+    /// snapshot the driver's ordinary connect path dials on the first read and nothing is armed.
+    /// The decision is the caller's — it patched the handle in and must not be second-guessed by
+    /// a CoreBluetooth lookup that races the central to poweredOn (field 2026-09-16 08:13: the
+    /// lookup said no, the scan fallback heard nothing for 5.5 min, the lease expired).
+    /// Returns false if there's no pod address.
     @discardableResult
-    public func podLoanBeginTakeover() -> Bool {
+    public func podLoanBeginTakeover(discover: Bool) -> Bool {
         guard let address = state.podState?.address else { return false }
-        // The grant snapshot was serialized AFTER the phone released the connection, so it
-        // arrives stamped podConnectionReleased=true — a lie on THIS device: leaving it set
-        // replays the init-time disarm on every relaunch mid-loan.
-        setState { $0.podConnectionReleased = false }
-        (podComms as? BlePodComms)?.beginLoanTakeover(podId: address)
+        if discover {
+            (podComms as? BlePodComms)?.beginLoanTakeover(podId: address)
+        }
         return true
     }
 
