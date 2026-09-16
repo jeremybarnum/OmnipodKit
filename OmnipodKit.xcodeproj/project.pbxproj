@@ -169,10 +169,12 @@
 				Common/FrameworkLocalText.swift,
 				Common/Image.swift,
 				Common/NibLoadable.swift,
+				Common/SilentTune.swift,
 				Common/UIColor.swift,
 				Common/UIDevice.swift,
 				Info.plist,
 				PumpManagerUI/OmniHUDProvider.swift,
+				PumpManagerUI/Views/InPlayConnectionInfoView.swift,
 				"PumpManagerUI/OmniPumpManager+UI.swift",
 				PumpManagerUI/OmniUI.xcassets,
 				PumpManagerUI/ViewControllers/OmniUICoordinator.swift,
@@ -225,6 +227,7 @@
 				PumpManagerUI/Views/UncertaintyRecoveredView.swift,
 				Resources/blank.wav,
 				Resources/heartbeat.wav,
+				Resources/silent.wav,
 				Services/O5AppAttestService.swift,
 			);
 			publicHeaders = (

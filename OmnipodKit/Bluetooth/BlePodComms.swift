@@ -34,6 +34,10 @@ class BlePodComms: PodComms {
     /// loan's settle diagnostics, which reported nothing at all before.
     private(set) var bluetoothManager: BluetoothManager!
 
+    /// Whether a host has asked the pump to provide the BLE heartbeat (see
+    /// OmniPumpManager.bleHeartbeatUnsupportedForThisPod).
+    var isBLEHeartbeatRequested: Bool { bluetoothManager?.isBLEHeartbeatRequested ?? false }
+
     override init(podState: PodState?, podType: PodType, myId: UInt32 = 0, podId: UInt32 = 0) {
         super.init(podState: podState, podType: podType, myId: myId, podId: podId)
         bluetoothManager = BluetoothManager(podType: podType)
@@ -214,6 +218,12 @@ class BlePodComms: PodComms {
     func forgetBluetoothManager() {
         bluetoothManager.connectionDelegate = nil
         bluetoothManager = nil
+    }
+
+    /// Sets bluetoothManager's podKeepAlive value to drive the pod connection policy.
+    func setPodKeepAliveKeepsConnectedInBackground(_ keepConnectedInBackground: Bool) {
+        print("@@@ setting bluetoothManager.podKeepAliveKeepsConnectedInBackground to \(keepConnectedInBackground)")
+        bluetoothManager.podKeepAliveKeepsConnectedInBackground = keepConnectedInBackground
     }
 
     func connectToNewPod(_ completion: @escaping (Result<Omni, Error>) -> Void) {
