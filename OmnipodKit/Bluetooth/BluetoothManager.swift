@@ -190,9 +190,6 @@ class BluetoothManager: NSObject {
 
     /// The last connect failure, kept so a settle that never verifies can say WHY.
     private var lastConnectFailure: (id: String, code: String, at: Date)?
-    /// Connects that reached didConnect in this process; the cached-handle takeover fallback
-    /// compares it before/after its window because a successful link may already have idled out.
-    private var connectsResolved = 0
 
     /// One line of BLE state for the loan's diagnostics.
     ///
@@ -229,69 +226,6 @@ class BluetoothManager: NSObject {
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
 
-    /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the
-    /// peripheral this device discovers (its own CoreBluetooth UUID), rather than the
-    /// foreign identifier from the granted pod state.
-    /// Takeover using a handle THIS device already holds — no discovery.
-    ///
-    /// Discovery is name resolution (pod id -> local `CBPeripheral`), and it only has to happen
-    /// once per device/pod. When we have the answer cached, `retrievePeripherals` hands back the
-    /// peripheral and the ordinary connect-on-demand path takes it from there.
-    ///
-    /// Two things make this safe to prefer:
-    ///
-    /// - A handle iOS does not recognise fails IMMEDIATELY (`retrievePeripherals` returns
-    ///   empty), so a stale cache costs nothing — we fall straight through to the scan.
-    /// - A handle it DOES recognise can still be unreachable (pod out of range, dead, held by
-    ///   someone else), and a bare `connect()` has no timeout, so that case would hang forever.
-    ///   Hence the fallback timer: if we are not connected shortly, arm the scan after all. The
-    ///   fast path is an optimisation, never the only route.
-    ///
-    /// Returns true if the fast path was taken, false if the caller should scan.
-    @discardableResult
-    func beginLoanTakeoverUsingKnownHandle(podId: UInt32, uuidString: String) -> Bool {
-        // Resolve ON the central's queue (see canResolvePeripheral): this is reached from the
-        // loan controller's queue, and touching `manager` from there is undefined behaviour.
-        let resolved: CBPeripheral? = UUID(uuidString: uuidString).flatMap { uuid in
-            managerQueue.sync {
-                self.manager.state == .poweredOn
-                    ? self.manager.retrievePeripherals(withIdentifiers: [uuid]).first
-                    : nil
-            }
-        }
-        guard let peripheral = resolved else {
-            log.default("PODLOAN: cached handle %{public}@ not retrievable — scanning instead", uuidString)
-            connectionDelegate?.omnipodLogDeviceEvent("[loan-takeover] cached handle NOT retrievable — falling back to discovery")
-            return false
-        }
-        managerQueue.async {
-            self.loanScanMarkerReason = "beginLoanTakeover(cached handle)"
-            self.loanTakeoverPodId = podId
-            self.connectionDelegate?.omnipodLogDeviceEvent(
-                "[loan-takeover] using cached handle \(uuidString) — NO SCAN (fallback armed +\(Int(Self.knownHandleFallbackSeconds))s)")
-            self.addPeripheral(peripheral, podAdvertisement: nil)
-            self.autoConnectIDs.insert(uuidString)
-            let resolvedAtArm = self.connectsResolved
-            self.timedConnect(peripheral)
-            // The only thing standing between a wrong-but-known handle and an indefinite hang.
-            self.managerQueue.asyncAfter(deadline: .now() + Self.knownHandleFallbackSeconds) { [weak self] in
-                guard let self = self, self.loanTakeoverPodId == podId else { return }
-                // Test whether a connect SUCCEEDED, not whether the link is up right now
-                // (2026-08-20: the first cut checked `state != .connected` and fired five seconds
-                // after a takeover that had already worked — with connect-on-demand the driver
-                // drops the link 4 s after the last command, so "not connected" is the normal
-                // resting state, and we re-armed the very scan the cached handle had just saved).
-                guard self.connectsResolved == resolvedAtArm else { return }
-                self.connectionDelegate?.omnipodLogDeviceEvent(
-                    "[loan-takeover] cached handle did not connect in \(Int(Self.knownHandleFallbackSeconds))s — arming discovery scan")
-                self.loanScanMarkerReason = "cached-handle fallback"
-                if self.manager.isScanning { self.manager.stopScan() }
-                self.startScanning()
-            }
-        }
-        return true
-    }
-
     /// Whether CoreBluetooth still recognises this handle on THIS device. A handle it does not
     /// know fails here immediately, which is what makes preferring the cache safe.
     func canResolvePeripheral(uuidString: String) -> Bool {
@@ -305,12 +239,9 @@ class BluetoothManager: NSObject {
         }
     }
 
-    /// How long a cached handle gets before we fall back to discovery. Comfortably longer than a
-    /// measured connect (~1.3 s, n=4) and shorter than the takeover read ladder's first backstop.
-    static var knownHandleFallbackSeconds: TimeInterval {
-        (UserDefaults.standard.object(forKey: "OmnipodKit.knownHandleFallbackSeconds") as? Double) ?? 6
-    }
-
+    /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the
+    /// peripheral this device discovers (its own CoreBluetooth UUID), rather than the
+    /// foreign identifier from the granted pod state.
     func beginLoanTakeover(podId: UInt32) {
         managerQueue.async {
             self.loanScanMarkerReason = "beginLoanTakeover"
@@ -945,43 +876,6 @@ class BluetoothManager: NSObject {
         log.default("BluetoothManager #%{public}@ DEINIT", instanceID)
     }
 
-#if os(watchOS)
-    /// PODLOAN self-heal. The watch orphans the pod between doses; a reclaim that
-    /// stalls leaves the peripheral `.connecting`, and the following release cancels it —
-    /// which wedges it in `.disconnecting` and poisons the stack, so every subsequent
-    /// reclaim then fails until the app is relaunched. Relaunch works only because it
-    /// builds a FRESH `CBCentralManager`, so reproduce that in-process: drop the old
-    /// central (its pending connects/disconnects go with it) and build a new one.
-    /// `centralManagerDidUpdateState` re-retrieves and reconnects whatever is still in
-    /// `autoConnectIDs` once the new central powers on — the same path that recovers a
-    /// user-terminated restart. watchOS has no CB state restoration, so there is no
-    /// restore identifier to reconcile. Isolated to `managerQueue`.
-    private func recreateCentral() {
-        dispatchPrecondition(condition: .onQueue(managerQueue))
-        log.default("PODLOAN: recreating CBCentralManager to clear a wedged/stalled BLE stack")
-        manager.delegate = nil
-        devices.removeAll()
-        manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
-    }
-
-    /// PODLOAN E4 reclaim escalation (157). A reclaim's bare pending-connect is
-    /// probabilistic after a long idle (field 2026-07-22: caught a 578s-idle pod, missed a
-    /// 518s-idle one) while the takeover's scan-and-adopt landed 4/4 from arbitrary state.
-    /// When the gentle connect hasn't landed mid-ladder, escalate to the takeover-grade
-    /// path: drop the central (clears the stalled pending connect) and arm the same
-    /// scan-adopt used at takeover. The new central's poweredOn handler then races BOTH
-    /// recovery paths — the autoConnectIDs re-connect and the address scan — and whichever
-    /// sees the pod first wins.
-    func escalateLoanReclaim(podId: UInt32) {
-        managerQueue.async {
-            self.log.default("PODLOAN: reclaim escalation — recreating central + arming scan-adopt for pod 0x%x", podId)
-            self.loanScanMarkerReason = "escalate"
-            self.loanTakeoverPodId = podId
-            self.recreateCentral()
-        }
-    }
-#endif
-
 #if os(iOS)
     /// PODLOAN: the same escalation for the PHONE, minus the central rebuild.
     ///
@@ -1153,21 +1047,11 @@ class BluetoothManager: NSObject {
                     log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
                     manager.cancelPeripheralConnection(peripheral)
                 case .connecting, .disconnecting:
-                    #if os(watchOS)
-                    // PODLOAN E4: cancelling a NON-settled connection wedges the peripheral
-                    // in .disconnecting and poisons the stack. Drop the whole central
-                    // instead — a clean teardown of the pending connect, no wedge. The pod
-                    // is already out of autoConnectIDs, so the fresh central stays quiet.
-                    log.default("updateConnections: peripheral not settled (%{public}@) — recreating central instead of cancelling", String(describing: peripheral.state.rawValue))
-                    recreateCentral()
-                    return
-                    #else
-                    // iOS (stock): cancel a pending connect; leave a disconnecting one.
+                    // Cancel a pending connect; leave a disconnecting one.
                     if peripheral.state == .connecting {
                         log.info("updateConnections: Disconnecting from peripheral: %{public}@", peripheral)
                         manager.cancelPeripheralConnection(peripheral)
                     }
-                    #endif
                 case .disconnected:
                     break
                 @unknown default:
@@ -1783,49 +1667,6 @@ class BluetoothManager: NSObject {
         return result
     }
 
-    #if os(watchOS)
-    /// One-shot per launch (recreated centrals skip it — their predecessors are this process's
-    /// own business, and E4 no longer recreates anyway).
-    private var launchReapDone = false
-
-    /// FORCE-QUIT AS A SOLUTION (ruling 2026-08-23). CoreBluetooth connect requests live in
-    /// bluetoothd keyed to the APP, so they survive force-quit — the user's reflexive
-    /// quit-and-reopen mid-retry left orphaned pending connects silently consuming the watch's
-    /// 2-slot budget until the radio went blind (pure line, production build: refused-with-#11
-    /// escalating to ZERO adverts in 108 s across retries; a Bluetooth toggle cleared it first
-    /// try). Users cannot be trained out of force-quitting; the app must make it safe instead.
-    /// A relaunched app CAN cancel its dead predecessor's requests — bluetoothd keys them to
-    /// the app, not the process — so do it at first poweredOn.
-    ///
-    /// SCOPE: POD identifiers only, and only peripherals sitting in .connecting — a fresh
-    /// launch has issued no connects of its own yet, so any .connecting here is necessarily
-    /// the dead predecessor's. The G7 client's standing pending connect is NEVER touched:
-    /// that pending IS the piggyback acquisition mechanism (triggers a/b), and cancelling it
-    /// kills CGM — the hard boundary from the pure line's triage (POD_CONNECTION_MODEL §4.66).
-    private func launchReapOrphanedConnects(_ central: CBCentralManager) {
-        dispatchPrecondition(condition: .onQueue(managerQueue))
-        guard !launchReapDone else { return }
-        launchReapDone = true
-        var candidates = Set(autoConnectIDs)
-        candidates.formUnion(PodLoanBleIdentifierCache.allIdentifiers())
-        guard !candidates.isEmpty else {
-            log.default("[launch-reap] no known pod identifiers — nothing to check")
-            return
-        }
-        let uuids = candidates.compactMap(UUID.init(uuidString:))
-        let found = central.retrievePeripherals(withIdentifiers: uuids)
-        var reaped = 0
-        for peripheral in found where peripheral.state == .connecting {
-            central.cancelPeripheralConnection(peripheral)
-            reaped += 1
-            log.default("[launch-reap] cancelled ORPHANED pending connect %{public}@ (left by a dead process)", peripheral.identifier.uuidString)
-        }
-        connectionDelegate?.omnipodLogDeviceEvent(reaped > 0
-            ? "[launch-reap] \(reaped) orphaned pod connect(s) from a dead process CANCELLED — the slot budget is whole again"
-            : "[launch-reap] clean launch — no orphaned pod connects (\(found.count) known handle(s) checked)")
-    }
-    #endif
-
     override var debugDescription: String {
         
         var report = [
@@ -1850,9 +1691,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
         log.default("[#%{public}@] %{public}@: %{public}@", instanceID, #function, String(describing: central.state.rawValue))
 
         if case .poweredOn = central.state {
-            #if os(watchOS)
-            launchReapOrphanedConnects(central)
-            #endif
             // bluetooth may have reset; update peripheral references
             for device in devices {
                 if let newPeripheral = central.retrievePeripherals(withIdentifiers: [device.manager.peripheral.identifier]).first {
@@ -2178,7 +2016,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
         // branch's logs is void; the intent ledger (a separate system) remains valid.
         PodLoanConnectClock.noteConnect()
         dispatchPrecondition(condition: .onQueue(managerQueue))
-        connectsResolved += 1
 
         // We are connected — any outstanding fresh-discovery cold-connect fallback is now moot. Clearing
         // the token no-ops a still-pending 4s fallback timer (connectViaFreshDiscovery) so it cannot fire
@@ -2459,9 +2296,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
 /// entirely and use the driver's ordinary connect-on-demand path.
 ///
 /// Correctness note: a cached handle can go stale (pod replaced, app reinstalled, the OS
-/// remapping identifiers). A stale handle does not fail loudly — `connect()` has no timeout,
-/// so it pends forever. Callers MUST keep a discovery fallback on a timer rather than trusting
-/// this blindly. See `PodLoanWatchController`.
+/// remapping identifiers). An unrecognised handle fails `retrievePeripherals` at once and the
+/// takeover scans; a recognised-but-unreachable one fails the read inside the driver's own
+/// connect timeout and the controller forgets it (`PodLoanWatchController`).
 public enum PodLoanBleIdentifierCache {
     private static let defaultsKey = "OmnipodKit.podLoanBleIdentifiers"
     private static let log = OSLog(subsystem: "com.loopkit.OmnipodKit", category: "PodLoanBleIdentifierCache")
@@ -2489,14 +2326,6 @@ public enum PodLoanBleIdentifierCache {
         guard map.removeValue(forKey: key(podAddress)) != nil else { return }
         UserDefaults.standard.set(map, forKey: defaultsKey)
         os_log("forgot handle for pod %{public}@", log: log, type: .default, key(podAddress))
-    }
-
-    /// Every cached handle, for the launch reap — the durable list of pod identifiers this
-    /// app has ever connected to, which is exactly the set a dead predecessor could have left
-    /// a pending connect against.
-    public static func allIdentifiers() -> [String] {
-        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
-        return Array(map.values)
     }
 
     /// Test seam. Not for production use.

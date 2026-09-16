@@ -55,35 +55,12 @@ class BlePodComms: PodComms {
     // PODLOAN: adopt a pod paired by ANOTHER device (a loan takeover) by scanning for
     // its advertised address, since the granted pod state's bleIdentifier is a foreign
     // per-device CoreBluetooth UUID that this device can't retrieve.
-    /// PODLOAN #72 copy-divergence fix: apply the shared inherited-temp re-arm to THIS
-    /// object's PodState copy — the one every PodCommsSession is built from and writes back.
-    /// The manager's setState re-arm alone is dead on arrival: sessions never see it, the
-    /// first status read reports the C5-truncated temp as an immutable DoseStore row
-    /// (store-trump tombstones the raw), and the session write-back reverts the manager
-    /// copy. Called at takeover-begin, before any connection (and thus any session) can
-    /// exist; the lock is held for the podState mutation invariant regardless.
-    /// NOTE: the in-place mutation fires PodComms.podState.didSet → manager didChange
-    /// SYNCHRONOUSLY under the held lock — same shape as the session write-back at the
-    /// bottom of this file; all outward notifications from that cascade are queue.async,
-    /// so nothing can re-enter this lock (adversarial-review verified).
-    func podLoanRearmInheritedTempBasal(liveTempStart: Date, liveTempEnd: Date?) -> Bool {
-        podStateLock.lock()
-        defer { podStateLock.unlock() }
-        return podState?.podLoanRearmInheritedTempBasal(liveTempStart: liveTempStart, liveTempEnd: liveTempEnd) != nil
-    }
-
-    /// Whether this device holds a handle for the pod that CoreBluetooth still resolves.
-    var hasResolvableLocalHandle: Bool {
-        guard let bleId = podState?.bleIdentifier else { return false }
-        return bluetoothManager.canResolvePeripheral(uuidString: bleId)
-    }
-
     func beginLoanTakeover(podId: UInt32) {
-        // Prefer a handle we already resolved for this pod on THIS device; discovery is only
-        // needed the first time. Falls through to the scan when we have none, when iOS no longer
-        // recognises it, or (on a timer, inside) when it is known but does not connect.
-        if let bleId = podState?.bleIdentifier,
-           bluetoothManager.beginLoanTakeoverUsingKnownHandle(podId: podId, uuidString: bleId) {
+        // A handle THIS device resolved before (the app patched it into podState at grant) needs
+        // no discovery and no second dialer: the driver's own connect-on-demand dials it on the
+        // first status read. Discovery is only for a pod this device has never adopted.
+        if let bleId = podState?.bleIdentifier, bluetoothManager.canResolvePeripheral(uuidString: bleId) {
+            log.default("PODLOAN: cached handle %{public}@ resolves — no takeover scan; the first read dials", bleId)
             return
         }
         bluetoothManager.beginLoanTakeover(podId: podId)
@@ -96,12 +73,13 @@ class BlePodComms: PodComms {
     /// podLoanLastSqnResync (seize prerequisite 2).
     private(set) var lastSqnResync: (at: Date, ours: Int, pods: Int)?
 
-    // PODLOAN E4 (157): escalate a stalled reclaim to the takeover-grade recovery — address
-    // scan-adopt, plus a fresh central on watchOS. Ungated: the phone reclaims too (hand-back
-    // settle, grant-lost, escape hatch) and was measured at 224s on the bare pending-connect.
+#if os(iOS)
+    // PODLOAN: the phone's reclaim escalation — address scan-adopt (hand-back settle, grant-lost,
+    // escape hatch; measured at 224s on the bare pending-connect). The watch has no reclaim.
     func escalateLoanReclaim(podId: UInt32) {
         bluetoothManager.escalateLoanReclaim(podId: podId)
     }
+#endif
 
     // PODLOAN: the takeover scan found and adopted the pod; record THIS device's
     // peripheral UUID as the pod's bleIdentifier so the connect/session path (which
@@ -811,28 +789,6 @@ class BlePodComms: PodComms {
         // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
         // so configureAndRun can bootstrap the first on-demand connect. Without this, every command
         // failed with podNotConnected and the connect could never start.
-#if os(watchOS)
-        // ORPHANED BY recreateCentral (field 2026-08-20 22:16, epoch 154). PeripheralManager
-        // holds its central WEAKLY. recreateCentral() — the watchOS escape hatch for a
-        // peripheral wedged in .connecting — swaps in a new CBCentralManager and clears
-        // `devices`, so the old central deallocates and every existing PeripheralManager's
-        // `central` silently becomes nil. We keep a STRONG reference to one of those, and the
-        // re-adopt below only ran `if manager == nil`, so an orphan was never replaced: from
-        // that moment every command threw `notReady` before issuing a connect, permanently.
-        //
-        // In the log that reads as a ladder with `adverts=0 anySeen=0` and no `[intent] connect`
-        // line at all — 14 reads, 28 s, nothing on the radio, because nothing was ever asked
-        // for. The escalation meant to clear a wedged stack is what wedged the command path.
-        //
-        // So: treat a nil central as no manager. If the device list no longer has an entry
-        // (recreateCentral emptied it), rebuild one from our cached handle first — the same
-        // handle the loan cache keeps — which is exactly what the phone does from a cold start.
-        if let existing = manager, existing.central == nil {
-            log.default("[connectOnDemand] PeripheralManager orphaned by a central recreate — re-adopting")
-            omnipodLogDeviceEvent("[connectOnDemand] ** ORPHANED PeripheralManager (central=nil) ** — re-adopting from the pod's handle")
-            manager = nil
-        }
-#endif
         // STALE MANAGER, not just orphaned manager (bench 2026-08-21 12:42). The orphan/adopt
         // cycle REPLACES the device entry — addPeripheral logs "removed discarded pod from
         // devices" — so didConnect is delivered to the NEW PeripheralManager while a session
@@ -852,8 +808,8 @@ class BlePodComms: PodComms {
             self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
 #if os(watchOS)
             if self.manager == nil {
-                // The device entry went with the old central; recreate it from the handle so
-                // the next line can adopt. Harmless when the entry already exists.
+                // init's connectToDevice ran before the central was poweredOn, so the device entry
+                // may not exist yet on the first read — re-issue the retrieve now (no-op if it does).
                 bluetoothManager.connectToDevice(uuidString: bleId)
                 self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
             }
