@@ -160,19 +160,12 @@ extension PeripheralManager {
                 do {
                     self.log.bleDebug("Applying configuration")
                     try self.applyConfiguration()
-#if !os(watchOS)
                     self.needsConfiguration = false
-#endif
 
                     if let delegate = self.delegate {
                         try delegate.completeConfiguration(for: self)
                         self.log.bleDebug("Delegate configuration notified")
                     }
-#if os(watchOS)
-                    // #86 (2026-08-03): cleared only after the handshake returned, so a failed
-                    // hello/session leaves the manager armed to reconfigure on the next connect.
-                    self.needsConfiguration = false
-#endif
 
                     self.log.bleDebug("Peripheral configuration completed")
                 } catch let error {
@@ -596,9 +589,6 @@ extension PeripheralManager {
                   String(describing: error), peripheral)
         self.queue.async {
             self.idleStart = nil
-#if os(watchOS)
-            self.needsConfiguration = true   // #86: a dropped link invalidates the session established over it
-#endif
         }
     }
 

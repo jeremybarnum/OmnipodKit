@@ -102,16 +102,14 @@ extension OmniPumpManager {
         return true
     }
 
-#if os(iOS)
-    /// PODLOAN: phone reclaim escalation. A hand-back settle, a lost grant or the escape-hatch
+    /// PODLOAN: the lender's reclaim escalation. A hand-back settle, a lost grant or the escape-hatch
     /// force-reclaim sits on a bare pending-connect that proved probabilistic against an idle pod
     /// (measured at 224 s on a settle); this arms the scan-adopt that actually finds it.
-    /// No-op if there's no pod address. The watch has no reclaim: its driver dials on demand.
+    /// No-op if there's no pod address. Compiles on both platforms; the watch has no caller.
     public func podLoanEscalateReclaim() {
         guard let address = state.podState?.address else { return }
         (podComms as? BlePodComms)?.escalateLoanReclaim(podId: address)
     }
-#endif
 
     /// A REAL status read, bypassing the freshness optimization (getPodStatus is
     /// internal and ensureCurrentPumpData skips the read unless data is stale — neither
@@ -188,7 +186,6 @@ extension OmniPumpManager {
 
     // MARK: - PumpConnectionLendable (the phone half)
 
-#if os(iOS)
     /// PumpConnectionLendable: go LOOKING for the pod instead of waiting to hear it.
     ///
     /// The default reclaim re-arms a bare pending-connect, which the E4 work found to be
@@ -196,7 +193,7 @@ extension OmniPumpManager {
     /// the takeover's scan-and-adopt landed 4/4 from arbitrary state. The phone had no way to
     /// reach that path — the escalation was gated watchOS-only — so a hand-back settle sat on the
     /// bare connect: measured at 224.2s and 237.0s on consecutive evenings, on the escape hatch.
-    /// Phone only: watchOS takes the protocol's default (nil — nothing to escalate).
+    /// Compiles on both platforms; the watch has no caller.
     @discardableResult
     public func escalateConnectionReclaim() -> String? {
         guard let address = state.podState?.address else {
@@ -207,7 +204,6 @@ extension OmniPumpManager {
         podLoanEscalateReclaim()
         return String(format: "scan-adopt armed for pod 0x%X", address)
     }
-#endif
 
 
     /// True while the pod's connection is deliberately released (on loan).

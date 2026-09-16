@@ -318,30 +318,7 @@ class BluetoothManager: NSObject {
     /// wakes otherwise. Alerts (no service-UUID change) are NOT caught here — the heartbeat probe surfaces
     /// those. Coexists with the StartDelay heartbeat probe. See DASH_BEACON_FINDINGS.md.
     static var lowPowerMonitorEnabled: Bool {
-        // DEFAULT OFF ON watchOS (Jeremy, 2026-09-09 02:20, after three preregistered runs).
-        //
-        // This idle scan arms on every pod disconnect — which on the watch is inside the G7
-        // sensor's post-burst tail — and it is what turns a survivable connect retry into
-        // bluetoothd's -70 dBm floor (the "G7 mute"). Same recipe three times, judgment already
-        // at 1, phone fully cut off: with this scan ON the daemon's second retry COMPLETED a
-        // connection to a sensor that had already stopped, scored it, and parked minRSSI=-70
-        // (00:52:08, 01:17:14 — wedged both times, next bursts advertised 25 s with nobody
-        // asking). With it OFF the identical retry churn on the air scored nothing past the
-        // fast scan, wrote -100, and the next burst connected (01:50 run). Best-fit mechanism:
-        // our scan raises the radio's scan duty cycle enough for the controller to catch the
-        // sensor's last advertisements and complete a doomed link. Full record: the G7 mute
-        // investigation doc on reclaim-lean-bench-pm, and the port memory.
-        //
-        // Cost: connectionless pod-fault detection (~1 min) becomes detection at the next
-        // cycle's connect. Alerts are unaffected (they never changed the advertised UUID).
-        // The iOS default is untouched — the phone's bluetoothd was never implicated.
-        // Still read at use, so the diagnostics-screen toggle and a shell default both work.
-        #if os(watchOS)
-        let shippedDefault = false
-        #else
-        let shippedDefault = true
-        #endif
-        return UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? shippedDefault
+        UserDefaults.standard.object(forKey: "OmnipodKit.lowPowerMonitorEnabled") as? Bool ?? true
     }
 
     /// Master switch for the IDLE scan (startScanning). ON = run the C00A fault listener while
@@ -618,28 +595,6 @@ class BluetoothManager: NSObject {
     /// `isAppForeground` — i.e. no change from the validated connect-on-demand behavior. Read from
     /// managerQueue and cross-queue by PeripheralManager (benign bool race).
     var shouldHoldConnection: Bool {
-#if os(watchOS)
-        // NEVER HOLD ON THE WATCH (2026-08-20, measured). The foreground rule below is right
-        // for a phone and wrong here, for two reasons found in one evening's field test:
-        //
-        // 1. THE POD HANGS UP ON AN IDLE HELD LINK — Code=7, peripheral-initiated, every ~5 s.
-        //    A phone survives holding it only because its keep-alive constantly polls the pod;
-        //    a watch between doses sends nothing, so the pod terminates the link and we
-        //    reconnect, over and over.
-        // 2. THAT CHURN COSTS G7 ITS SLOT. Each reconnect briefly overlaps the old teardown
-        //    with a new pending connect, and G7's retries land in those windows:
-        //    CBError 11 (connection limit), sensor gone, ring orange, loop blind. Measured on
-        //    loan 149 with the hold-for-loan arm; it took ~13 minutes to bite.
-        //
-        // A phone has no CGM central competing in-process, so it can afford to hold. This
-        // watch cannot, and gains nothing by it: a bare connect resolves in ~1.3 s (n=4), so
-        // even a wrist bolus does not need a standing link.
-        //
-        // With this false, the driver's own 4 s idle-disconnect governs release, which is
-        // strictly better than the loan layer's fixed 12 s timer — it resets per session, so a
-        // status-read + dose burst shares ONE connection instead of two.
-        return false
-#else
         if isAppForeground { return true }
         // Eager-gated pods (InPlay + affected iPhone): reconnecting costs a wedge storm, and the pod
         // releases the link itself after ~180s of inactivity anyway — so never tear it down on
@@ -647,7 +602,6 @@ class BluetoothManager: NSObject {
         // background connects), which restores it without needing app CPU while suspended.
         if let peripheral = keepAlivePeripheral, shouldUseEagerConnect(for: peripheral) { return true }
         return podKeepAliveKeepsConnectedInBackground
-#endif
     }
 
     /// True once this PROCESS has ever been foregrounded. A [delayedConnect] with everFg=false means
@@ -732,10 +686,6 @@ class BluetoothManager: NSObject {
             connectRequestedAt[peripheral.identifier.uuidString] = Date()
         }
         let cm: CBCentralManager = manager
-#if os(watchOS)
-        // A connect already in flight is doing everything a duplicate would (2026-08 takeover race).
-        guard peripheral.state != .connecting else { return }
-#endif
         cm.connect(peripheral, options: nil)
         // Pairing/discovery connect: without a watchdog, a wedged connect was abandoned on the discovery
         // timeout WITHOUT cancelling, leaving iOS silently re-wedging the pod — which then stops
@@ -792,14 +742,6 @@ class BluetoothManager: NSObject {
         let pid = ProcessInfo.processInfo.processIdentifier
         log.default("[delayedConnect] pid=%{public}d everFg=%{public}@ issuing connect with StartDelay=%{public}ds for %{public}@", pid, String(everForeground), delaySeconds, peripheral.identifier.uuidString)
         connectionDelegate?.omnipodLogDeviceEvent("[delayedConnect] pid=\(pid) everFg=\(everForeground) issuing connect StartDelay=\(delaySeconds)s")
-#if os(watchOS)
-        // The re-arm found a connect already in flight: roll back the probe bookkeeping set just
-        // above, or delayedProbeInFlight latches true against a probe never issued.
-        if peripheral.state == .connecting {
-            delayedProbeInFlight = false
-            return
-        }
-#endif
         manager.connect(peripheral, options: [CBConnectPeripheralOptionStartDelayKey: NSNumber(value: delaySeconds)])
     }
 
@@ -822,11 +764,7 @@ class BluetoothManager: NSObject {
         log.default("BluetoothManager #%{public}@ INIT (podType=%{public}@)", instanceID, String(describing: podType))
 
         managerQueue.sync {
-#if os(iOS) // watchOS has no CoreBluetooth state restoration; the watch host owns reconnect policy
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])
-#else
-            self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: nil)
-#endif
         }
 
         // Track foreground/background so we can tell an iOS background wake/relaunch (everFg stays
@@ -876,20 +814,13 @@ class BluetoothManager: NSObject {
         log.default("BluetoothManager #%{public}@ DEINIT", instanceID)
     }
 
-#if os(iOS)
-    /// PODLOAN: the same escalation for the PHONE, minus the central rebuild.
-    ///
-    /// The watchOS version above was gated "iOS never reclaims a loan", which is not true of this
-    /// design — the phone reclaims at every hand-back settle, whenever a grant is lost, and on the
-    /// escape-hatch force-reclaim. It was therefore left with only the bare pending-connect that
-    /// the comment above calls probabilistic, and it shows: a measured hand-back settle of 224.2s
-    /// (and 237.0s earlier the same evening) against ~1s when the link happened to still be up.
-    /// Four minutes of silence on the ESCAPE HATCH is the worst place for this to be slow.
-    ///
-    /// Arms the same scan-adopt, which is what actually finds an idle pod, and deliberately does
-    /// NOT call recreateCentral(): watchOS has no CoreBluetooth state restoration, so dropping its
-    /// central is free, whereas on iOS the central owns a restore identifier and rebuilding it
-    /// would discard the restoration the app depends on after a background relaunch.
+    /// PODLOAN: the lender's reclaim escalation. The phone reclaims at every hand-back settle,
+    /// whenever a grant is lost, and on the escape-hatch force-reclaim; a bare pending-connect
+    /// proved probabilistic against an idle pod (measured hand-back settles of 224.2s and 237.0s
+    /// against ~1s when the link happened to still be up). Arms the scan-adopt, which is what
+    /// actually finds an idle pod, and deliberately does NOT rebuild the central: it owns a restore
+    /// identifier, and rebuilding it would discard the restoration the app depends on after a
+    /// background relaunch. Compiles on both platforms; only the lender calls it.
     func escalateLoanReclaim(podId: UInt32) {
         managerQueue.async {
             self.log.default("PODLOAN: reclaim escalation (iOS) — arming scan-adopt for pod 0x%x (central preserved)", podId)
@@ -900,9 +831,6 @@ class BluetoothManager: NSObject {
             }
         }
     }
-#endif
-
-#if os(watchOS) || os(iOS)
 
     /// PODLOAN E4 (157): disarm an escalation scan that never found the pod. Called on
     /// release so the scan cannot outlive the reclaim ladder and contend with the G7
@@ -918,7 +846,6 @@ class BluetoothManager: NSObject {
             }
         }
     }
-#endif
 
     @discardableResult
     private func addPeripheral(_ peripheral: CBPeripheral, podAdvertisement: PodAdvertisement?) -> Omni {
@@ -1154,28 +1081,9 @@ class BluetoothManager: NSObject {
                 self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] takeover: continuous scan (no 4s teardown)")
                 return
             }
-            #if os(watchOS)
-            // NO SCAN ON THE WATCH — dial cold immediately (2026-08-23). The 4 s listen-first
-            // trade is PHONE physics: there a cold connect waits out iOS's duty-cycled
-            // reacquisition (10-16 s), so hearing an advert first wins. On the watch the
-            // measurement is inverted, both ways at once: the low-power scan heard ZERO adverts
-            // in 8/8 reclaim ladders (census adverts=0 across the whole idle-0 AND idle-300
-            // bench, pod at -50 dBm), while every cold connect landed in ~2.2 s. So the scan
-            // bought 4 s of guaranteed deafness before the fallback did the real work — and
-            // that 4.1 + 2.2 = 6.3 s is what pushed every read 1 just past its 6 s watchdog,
-            // making the rigid read-1-fails/read-2-succeeds pattern (~10 s reclaims, the whole
-            // residual). freshConnect directly: link ~2.2 s, read done ~5 s, watchdog silent.
-            // The wedged-.connecting flush lives in freshConnect itself, so nothing is lost.
-            self.pendingFreshConnectID = nil
-            self.log.default("[connectOnDemand] watch: cold connect immediately (scan is deaf here; see 2026-08-23 bench)")
-            self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] watch: immediate cold connect (no 4s scan)")
-            self.freshConnect(peripheral)
-            return
-            #else
             self.pendingFreshConnectID = id
             self.manager.stopScan()
             self.manager.scanForPeripherals(withServices: [self.podScanServiceUUID], options: nil)
-            #endif
             self.log.default("[connectOnDemand] fresh-discovery scan for %{public}@", id)
             self.connectionDelegate?.omnipodLogDeviceEvent("[connectOnDemand] fresh-discovery scan started")
             self.managerQueue.asyncAfter(deadline: .now() + 4.0) { [weak self] in
@@ -1741,7 +1649,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
     }
 
-#if os(iOS) // watchOS has no CoreBluetooth state restoration (willRestoreState / restored-state keys are iOS-only)
     func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         log.info("Omni %{public}@: %{public}@", #function, dict)
@@ -1762,7 +1669,6 @@ extension BluetoothManager: CBCentralManagerDelegate {
             }
         }
     }
-#endif
 
     /// The DASH "clear / no alert" status word (see DASH_BEACON_FINDINGS.md). Any other value while
     /// the pod is otherwise healthy indicates an active alert/alarm.

@@ -73,13 +73,12 @@ class BlePodComms: PodComms {
     /// podLoanLastSqnResync (seize prerequisite 2).
     private(set) var lastSqnResync: (at: Date, ours: Int, pods: Int)?
 
-#if os(iOS)
-    // PODLOAN: the phone's reclaim escalation — address scan-adopt (hand-back settle, grant-lost,
-    // escape hatch; measured at 224s on the bare pending-connect). The watch has no reclaim.
+    // PODLOAN: the lender's reclaim escalation — address scan-adopt (hand-back settle, grant-lost,
+    // escape hatch; measured at 224s on the bare pending-connect). Compiles on both platforms;
+    // the watch never calls it.
     func escalateLoanReclaim(podId: UInt32) {
         bluetoothManager.escalateLoanReclaim(podId: podId)
     }
-#endif
 
     // PODLOAN: the takeover scan found and adopted the pod; record THIS device's
     // peripheral UUID as the pod's bleIdentifier so the connect/session path (which
@@ -140,7 +139,6 @@ class BlePodComms: PodComms {
     func rearmConnection() {
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
-            #if os(iOS)
             // DIAL, don't just re-arm (2026-08-23). Under connect-on-demand this method issued
             // no connect at all: connectToDevice only dials an UNKNOWN peripheral (ours is
             // always known by reclaim time), updateConnections→autoReconnect returns
@@ -150,10 +148,8 @@ class BlePodComms: PodComms {
             // 24-28 s, pod advertising at -50 dBm the whole wait, census showing
             // scanning=false / zero connect intents until escalation. The command path's
             // fresh-discovery connect is the measured dial (~2-6 s cold), so issue it here
-            // and the settle finds the link up on an early tick instead.
-            // iOS ONLY: the watch's reclaim ladder is its own dialer (reads drive connects);
-            // a second in-flight connect from this seam would recreate the racing-owners bug
-            // the ladder work just removed.
+            // and the settle finds the link up on an early tick instead. Harmless on a watch:
+            // it has no released bid to re-arm, so this seam is never reached there.
             if BluetoothManager.connectOnDemandEnabled,
                let pm = bluetoothManager.peripheralManager(forIdentifier: bleIdentifier) {
                 // skipDiscovery: the watch released this pod seconds ago, so it is advertising
@@ -161,7 +157,6 @@ class BlePodComms: PodComms {
                 // +6.6/+8.8 s with the scan vs ~2.2 s for a bare cold connect).
                 bluetoothManager.connectOnDemand(pm.peripheral, skipDiscovery: true)
             }
-            #endif
         }
     }
 

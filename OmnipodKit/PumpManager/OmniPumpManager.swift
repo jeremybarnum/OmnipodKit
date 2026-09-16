@@ -1659,15 +1659,14 @@ extension OmniPumpManager {
 
     // Used to serialize a set of Pod Commands for a given session - vectors to correct version
     private func runSession(withName name: String, _ block: @escaping (_ result: PodComms.SessionRunResult) -> Void) {
-#if os(iOS)
-        // PODLOAN: while the pod is lent to the watch, the phone runs no pod command at all. The
-        // watch clears this flag on its own copy of the state at takeover, so only the lender gates.
+        // PODLOAN: a pump whose connection has been released takes no commands. The flag is set
+        // only by releaseConnection() — the lender at grant, the watch at hand-back teardown — so
+        // on a borrowing watch this never fires during a loan.
         if state.podConnectionReleased {
             log.default("PODLOAN: '%{public}@' refused — pod connection released (on loan)", name)
             block(.failure(.podNotConnected))
             return
         }
-#endif
         if let blePodComms = self.podComms as? BlePodComms {
             blePodComms.bleRunSession(withName: name, block)
         } else if let erosPodComms = self.podComms as? ErosPodComms {
