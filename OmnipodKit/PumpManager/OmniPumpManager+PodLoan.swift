@@ -38,38 +38,6 @@ import LoopKit
 
 extension OmniPumpManager {
 
-    /// The command kinds a pending (unacknowledged) pod command can have, as app code
-    /// needs to reason about them (journal event kinds, alert wording).
-    public enum PodLoanPendingKind: String {
-        case bolus
-        case tempBasal
-        case resume          // .program(.basalProgram) — reinstating the stored schedule
-        case suspend         // .stopProgram containing .basal
-        case cancelTempBasal
-        case cancelBolus
-    }
-
-    public enum PodLoanUncertaintyVerdict {
-        /// Nothing pending — either never uncertain, or stock recovery already ran on a
-        /// prior contact and the dose consequences are in hasNewPumpEvents.
-        case noPendingCommand
-        /// The pod executed the lost command (seq match or delivered-only corroboration).
-        case delivered(PodLoanPendingKind)
-        /// The pod never received it — the max-exposure assumption should be annulled.
-        case refuted(PodLoanPendingKind)
-        /// The pod could not be reached; the assumption stands, try again later.
-        case unreachable
-    }
-
-    /// Kind of the command whose fate is currently unknown, if any. App code uses this
-    /// to detect non-bolus uncertainty: enactTempBasal/suspend/resume report a generic
-    /// .communication error for an unacknowledged outcome (OmniPumpManager.swift:2795,
-    /// :2381) — only enactBolus returns .uncertainDelivery (:2578).
-    public var podLoanPendingCommandKind: PodLoanPendingKind? {
-        guard let pending = state.podState?.unacknowledgedCommand else { return nil }
-        return Self.podLoanKind(of: pending)
-    }
-
     /// The pod's cumulative-delivered odometer as last reported (R12: the audit, never
     /// the source). Freshen with podLoanReadStatus before snapshotting (OQ-5).
     public var podLoanInsulinDelivered: Double? {
@@ -155,37 +123,6 @@ extension OmniPumpManager {
             }
         }
         #endif
-    }
-
-    /// Chases the verdict on the pending command NOW: one forced status read, then the
-    /// same rules stock applies internally — seq equality with the lost command
-    /// (PodCommsSession.swift:1113) OR delivered-only corroboration from the delivery-
-    /// status flags (checkCommandAgainstStatus, PodCommsSession.swift:1057-1107). The
-    /// status read itself triggers stock recovery, so by the time the completion runs
-    /// the dose consequences are already flowing to hasNewPumpEvents; this method's
-    /// only addition is telling the caller WHICH way it resolved.
-    public func podLoanResolveUncertainty(completion: @escaping (PodLoanUncertaintyVerdict) -> Void) {
-        guard let pending = state.podState?.unacknowledgedCommand else {
-            completion(.noPendingCommand)
-            return
-        }
-        let kind = Self.podLoanKind(of: pending)
-        let sequence = pending.sequence
-
-        getPodStatus(canOptimize: false) { result in
-            switch result {
-            case .failure:
-                completion(.unreachable)
-            case .success(let statusOrNil):
-                guard let status = statusOrNil else {
-                    completion(.unreachable)
-                    return
-                }
-                let seqMatch = Int(status.lastProgrammingMessageSeqNum) == sequence
-                let corroborated = Self.podLoanStatusCorroboratesDelivery(of: pending, status: status)
-                completion(seqMatch || corroborated ? .delivered(kind) : .refuted(kind))
-            }
-        }
     }
 
     // MARK: - PumpConnectionLendable (the phone half)
@@ -309,41 +246,6 @@ extension OmniPumpManager {
         podLoanLastSqnResync?.at
     }
 
-    private static func podLoanKind(of pending: PendingCommand) -> PodLoanPendingKind {
-        switch pending {
-        case .program(let program, _, _, _):
-            switch program {
-            case .bolus: return .bolus
-            case .tempBasal: return .tempBasal
-            case .basalProgram: return .resume
-            }
-        case .stopProgram(let deliveryType, _, _, _):
-            if deliveryType.contains(.basal) { return .suspend }
-            if deliveryType.contains(.tempBasal) { return .cancelTempBasal }
-            return .cancelBolus
-        }
-    }
-
-    /// Mirror of PodCommsSession.checkCommandAgainstStatus (PodCommsSession.swift:
-    /// 1057-1107): corroboration can only ADD a delivered verdict, never refute a seq
-    /// match. A rate-0 temp IS a running temp (tempBasalRunning) — the R3 suspend
-    /// resolves through the tempBasal row.
-    private static func podLoanStatusCorroboratesDelivery(of pending: PendingCommand, status: StatusResponse) -> Bool {
-        let delivery = status.deliveryStatus
-        switch pending {
-        case .program(let program, _, _, _):
-            switch program {
-            case .bolus: return delivery.bolusing
-            case .tempBasal: return delivery.tempBasalRunning
-            case .basalProgram: return !delivery.suspended
-            }
-        case .stopProgram(let deliveryType, _, _, _):
-            if deliveryType.contains(.basal) { return delivery.suspended }
-            if deliveryType.contains(.tempBasal) { return !delivery.tempBasalRunning }
-            if deliveryType.contains(.bolus) { return !delivery.bolusing }
-            return false
-        }
-    }
 }
 
 // PODLOAN: the optional capability the Loop app discovers by conditional cast
