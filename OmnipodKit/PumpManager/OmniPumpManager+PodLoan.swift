@@ -277,19 +277,8 @@ extension OmniPumpManager {
     /// (the watch) can hold it uncontested. Pod state, pairing and keys are untouched;
     /// persisted across relaunches. Reverse: reclaimConnection().
     public func releaseConnection() {
-        let handedOverAt = Date()
         setState { (state) in
             state.podConnectionReleased = true
-            // C5 (loan-boundary accounting, R2): close this phone's RECORD of a running
-            // temp basal at the handover stamp. The pod keeps physically running the
-            // temp until the watch's first command supersedes it — that gap window is
-            // deliberately unjournaled and covered by the hand-back odometer audit.
-            // Without this truncation the mutable dose entry finalizes at its full
-            // programmed extent and OVERLAPS the watch journal's entries for the same
-            // wall-clock window, double-counting the deviation.
-            if let tempBasal = state.podState?.unfinalizedTempBasal, !tempBasal.isFinished(at: handedOverAt) {
-                state.podState?.unfinalizedTempBasal?.cancel(at: handedOverAt)
-            }
         }
         (podComms as? BlePodComms)?.releaseConnection()
     }
