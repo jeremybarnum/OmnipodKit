@@ -224,6 +224,14 @@ extension OmniPumpManager {
     /// connect re-arms; the session re-establishes on next contact and the next
     /// status poll resynchronizes state.
     public func reclaimConnection() {
+        // Another controller ran the pod while it was released, so the delivery status last
+        // received here no longer describes it. The driver keeps that status only while the last
+        // thing that happened to the pod was a reply it received (it clears it before every send,
+        // and never persists it); a loan breaks that without a send or a relaunch. Cleared BEFORE
+        // commands are let back in: nil makes tryToValidateComms read the pod first, and a running
+        // temp basal is then cancelled before a new one is set. 2026-09-19: the first command
+        // after a hand-back was a temp basal over the watch's running one — pod fault 0x31.
+        (podComms as? BlePodComms)?.forgetLastDeliveryStatus()
         setState { (state) in
             state.podConnectionReleased = false
         }

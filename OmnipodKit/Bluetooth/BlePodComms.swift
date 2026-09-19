@@ -129,6 +129,14 @@ class BlePodComms: PodComms {
         bluetoothManager.cancelLoanScan()
     }
 
+    // PODLOAN: the delivery status last received is no longer known to describe the pod.
+    // Safe to lock here: called only while the connection is released, when no session can run.
+    func forgetLastDeliveryStatus() {
+        podStateLock.lock()
+        podState?.lastDeliveryStatusReceived = nil
+        podStateLock.unlock()
+    }
+
     // PODLOAN: resume bidding after a loan ends. connectToDevice materializes the
     // peripheral via retrievePeripherals and connects; the session re-establishes
     // on next contact (pod-side EAP resynchronization).
@@ -415,6 +423,9 @@ class BlePodComms: PodComms {
                     "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): %d session(s) by another controller since our last contact [sqn-resync]",
                     podSqn, eapSeq, delta, max(0, delta)))
                 podState!.bleMessageTransportState.eapSeq = podSqn
+                // PODLOAN: sessions by another controller since our last contact — a seize this
+                // device never released for. Same rule as reclaimConnection(): read before writing.
+                if delta > 0 { podState!.lastDeliveryStatusReceived = nil }
             }
             return nil
         case .SessionKeys(let keys):
