@@ -760,6 +760,7 @@ class BluetoothManager: NSObject {
 
         log.default("BluetoothManager #%{public}@ INIT (podType=%{public}@)", instanceID, String(describing: podType))
 
+        log.default("central: creating (podType %{public}@) — inside managerQueue.sync; a restoration callback delivered synchronously here would deadlock", String(describing: podType))
         managerQueue.sync {
             self.manager = CBCentralManager(delegate: self, queue: managerQueue, options: [CBCentralManagerOptionRestoreIdentifierKey: "com.OmnipodKit"])
         }
@@ -778,6 +779,7 @@ class BluetoothManager: NSObject {
                 self.enterForeground()
             }
         }
+        log.default("central: created")
         center.addObserver(forName: HostAppState.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             let pid = ProcessInfo.processInfo.processIdentifier
             self?.managerQueue.async {
