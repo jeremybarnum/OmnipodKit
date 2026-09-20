@@ -420,12 +420,15 @@ class BlePodComms: PodComms {
                 let delta = podSqn - eapSeq
                 lastSqnResync = (at: Date(), ours: eapSeq, pods: podSqn)
                 PodLoanConnectClock.podLoanLog(String(format:
-                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): %d session(s) by another controller since our last contact [sqn-resync]",
-                    podSqn, eapSeq, delta, max(0, delta)))
+                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): another controller has talked to this pod since our last contact [sqn-resync]",
+                    podSqn, eapSeq, delta))
                 podState!.bleMessageTransportState.eapSeq = podSqn
-                // PODLOAN: sessions by another controller since our last contact — a seize this
-                // device never released for. Same rule as reclaimConnection(): read before writing.
-                if delta > 0 { podState!.lastDeliveryStatusReceived = nil }
+                // PODLOAN: another controller has talked to this pod since our last contact — a
+                // seize this device never released for. Same rule as reclaimConnection(): read
+                // before writing. ANY resync counts: the delta reads 0 after a single foreign
+                // session (bench 2026-09-20: 13 of 13 resyncs followed a phone session, all Δ+0),
+                // and the one temp set that day with no cancel before it sat behind such a resync.
+                podState!.lastDeliveryStatusReceived = nil
             }
             return nil
         case .SessionKeys(let keys):
