@@ -66,6 +66,15 @@ class BlePodComms: PodComms {
         return podState?.podLoanRearmInheritedTempBasal(liveTempStart: liveTempStart, liveTempEnd: liveTempEnd) != nil
     }
 
+    /// PODLOAN: drop the cached delivery status so the next command reads the pod before it
+    /// writes to it (see OmniPumpManager.reclaimConnection). Called only while the connection
+    /// is released, when no session can be running, so taking the lock here cannot deadlock.
+    func forgetLastDeliveryStatus() {
+        podStateLock.lock()
+        podState?.lastDeliveryStatusReceived = nil
+        podStateLock.unlock()
+    }
+
     func beginLoanTakeover(podId: UInt32) {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
@@ -392,6 +401,10 @@ class BlePodComms: PodComms {
                     "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): %d session(s) by another controller since our last contact [sqn-resync]",
                     podSqn, eapSeq, delta, max(0, delta)))
                 podState!.bleMessageTransportState.eapSeq = podSqn
+                // PODLOAN: another controller ran this pod since our last contact, so whatever
+                // we believe about its delivery state is stale — read before writing. Covers a
+                // seize this phone never released for. Not sufficient alone: Δ+0 resyncs exist.
+                if delta > 0 { podState!.lastDeliveryStatusReceived = nil }
             }
             return nil
         case .SessionKeys(let keys):
