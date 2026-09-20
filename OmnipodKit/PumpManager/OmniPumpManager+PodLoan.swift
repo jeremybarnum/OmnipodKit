@@ -358,6 +358,16 @@ extension OmniPumpManager {
     /// connect re-arms; the session re-establishes on next contact and the next
     /// status poll resynchronizes state.
     public func reclaimConnection() {
+        // FIRST, before any command can slip in: forget what this process believes about the
+        // pod's delivery state. The process lived through the loan holding "no temp running"
+        // from before the grant, and enactTempBasal only cancels first when that belief says a
+        // temp is running (or is nil). Stock keeps the belief honest by clearing it before every
+        // send (PodCommsSession: "guard against possible 0x31 pod faults"); a loan changes the
+        // pod with no send of ours. Next-dev line, 2026-09-19 18:14: the phone's FIRST command
+        // after a clean hand-back was a set-temp over the watch's running temp — Critical Pod
+        // Fault 049 (0x31), a dead pod. nil makes the first command's tryToValidateComms read
+        // status, and the temp path then cancels before it sets.
+        (podComms as? BlePodComms)?.forgetLastDeliveryStatus()
         // Interlock mirror cleared FIRST — reclaiming is the owner asserting the pod back,
         // and the guard must never refuse a recovery (port-line safety note, 11ce454).
         (podComms as? BlePodComms)?.loanConnectionReleasedForBle = false
