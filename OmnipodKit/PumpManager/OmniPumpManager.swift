@@ -177,6 +177,9 @@ public class OmniPumpManager: RileyLinkPumpManager {
         guard let state = OmniPumpManagerState(rawValue: rawState) else {
             return nil
         }
+        // Timing marks: on a watch just powered up this initializer has taken 4, 18 and 40 s
+        // (0.1 s otherwise), all of it before the pod's own Bluetooth manager is created.
+        PodLoanConnectClock.podLoanLog("[init] state decoded")
 
         let deviceProvider: RileyLinkBluetoothDeviceProvider
         if let connectionManagerState = state.rileyLinkConnectionManagerState {
@@ -184,8 +187,10 @@ public class OmniPumpManager: RileyLinkPumpManager {
         } else {
             deviceProvider = RileyLinkBluetoothDeviceProvider(autoConnectIDs: [])
         }
+        PodLoanConnectClock.podLoanLog("[init] RileyLink provider created")
 
         self.init(state: state, rileyLinkDeviceProvider: deviceProvider)
+        PodLoanConnectClock.podLoanLog("[init] pump manager constructed")
 
         deviceProvider.delegate = self
     }
