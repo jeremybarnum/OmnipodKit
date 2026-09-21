@@ -291,7 +291,6 @@ public enum PodLoanConnectClock {
     private static var _connectCount = 0
     private static var _lastReason: String?
     private static var _reasons: [String] = []
-    private static var _lastCensus: String?
     /// #86: kept SEPARATE from _lastReason. In a retry storm didFailToConnect fires >=4x/sec and
     /// both overwrote one field + flooded the 12-slot trail, evicting the one datum that says why
     /// an ESTABLISHED link died (observed 2026-08-01: epoch 111's trail was 12x "x#11" and the
@@ -383,15 +382,11 @@ public enum PodLoanConnectClock {
         lock.unlock()
     }
 
-    /// `census` is the caller's snapshot of what THIS process holds (see
-    /// BluetoothManager.peripheralCensus). Only recorded on failures — it is the field that
-    /// separates our own retry storm from slots consumed elsewhere on the device.
-    public static func noteFailToConnect(error: Error? = nil, census: String? = nil) {
+    public static func noteFailToConnect(error: Error? = nil) {
         let d = describe(error), st = stateTag()
         lock.lock()
         if isCode11(error) { _lastCode11At = Date() }
         _lastReason = d
-        _lastCensus = census ?? _lastCensus
         _reasons.append("x\(d)@\(st)")
         if _reasons.count > 12 { _reasons.removeFirst() }
         lock.unlock()
@@ -400,7 +395,7 @@ public enum PodLoanConnectClock {
     public static func reset() {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
-        _lastReason = nil; _reasons = []; _lastCensus = nil; _lastDisconnectReason = nil
+        _lastReason = nil; _reasons = []; _lastDisconnectReason = nil
         _lastCode11At = nil
         lock.unlock()
     }
@@ -447,14 +442,13 @@ public enum PodLoanConnectClock {
     public static func summary(since start: Date?) -> String {
         lock.lock()
         let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
-        let r = _lastReason, trail = _reasons, cen = _lastCensus, dr = _lastDisconnectReason
+        let r = _lastReason, trail = _reasons, dr = _lastDisconnectReason
         lock.unlock()
         guard let start = start else { return "cb: (no anchor)" }
         func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
         let why = r.map { " · lastFail=\($0)" } ?? ""
         let dwhy = dr.map { " · lastDrop=\($0)" } ?? ""
         let tr = trail.isEmpty ? "" : " · trail[\(trail.joined(separator: " "))]"
-        let cz = cen.map { " · held[\($0)]" } ?? ""
-        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(dwhy)\(why)\(cz)\(tr)"
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(dwhy)\(why)\(tr)"
     }
 }
