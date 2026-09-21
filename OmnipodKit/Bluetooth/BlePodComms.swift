@@ -397,14 +397,20 @@ class BlePodComms: PodComms {
                 // ladder-facing accessor is podLoanLastSqnResync. Greppable: [sqn-resync].
                 let delta = podSqn - eapSeq
                 lastSqnResync = (at: Date(), ours: eapSeq, pods: podSqn)
+                // The count is NOT printed as "sessions by another controller": `eapSeq` is
+                // already incremented when it is taken, so one foreign session reads Δ+0
+                // (next-dev bench 2026-09-20: 13 of 13 resyncs after the other controller's
+                // sessions read Δ+0). A resync at all is the signal.
                 PodLoanConnectClock.podLoanLog(String(format:
-                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): %d session(s) by another controller since our last contact [sqn-resync]",
-                    podSqn, eapSeq, delta, max(0, delta)))
+                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): another controller has run this pod since our last contact [sqn-resync]",
+                    podSqn, eapSeq, delta))
                 podState!.bleMessageTransportState.eapSeq = podSqn
                 // PODLOAN: another controller ran this pod since our last contact, so whatever
                 // we believe about its delivery state is stale — read before writing. Covers a
-                // seize this phone never released for. Not sufficient alone: Δ+0 resyncs exist.
-                if delta > 0 { podState!.lastDeliveryStatusReceived = nil }
+                // seize this phone never released for. ANY resync, not a positive delta: the
+                // first cut guarded on `delta > 0`, which a single foreign session never
+                // satisfies (see the log note above), so it never fired. Cost: one status read.
+                podState!.lastDeliveryStatusReceived = nil
             }
             return nil
         case .SessionKeys(let keys):
