@@ -160,7 +160,7 @@ extension OmniPumpManager {
     /// as the acknowledgement beep and carries the same information. Jeremy, 2026-08-05: "let's
     /// eliminate these silent haptic bolus confirmations that overlap with beeps." Conditional
     /// rather than deleted, because beeps are still suppressed in the sport build (re-enabling
-    /// them for Caitlin is on the pre-production list) — deleting outright would leave a bolus
+    /// them is on the pre-production list) — deleting outright would leave a bolus
     /// confirming with nothing at all until that flips. The watch inherits these settings from
     /// the phone in the grant's pumpManagerRawState, so this tracks the phone automatically.
     public var podLoanBeepsOnManualBolus: Bool {
