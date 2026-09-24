@@ -140,9 +140,17 @@ class BluetoothManager: NSObject {
             self.loanTakeoverPodId = podId
             if self.manager.state == .poweredOn {
                 self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
-                if !self.manager.isScanning {
-                    self.startScanning()
+                // A scan already running began BEFORE takeover was armed (the plain
+                // auto-connect scan a fresh central starts at poweredOn), so it may have
+                // heard this pod's advert and ignored it — and CoreBluetooth reports each
+                // peripheral once per scan, so it never comes again. Restart, so the
+                // advert reaches an armed takeover. Field 2026-09-24 12:02: the watch's
+                // quiet window held takeover back 17 s, the pod was never reported,
+                // TAKEOVER FAILED after 14 reads.
+                if self.manager.isScanning {
+                    self.stopScanning()
                 }
+                self.startScanning()
             } else {
                 // The common case: takeover arms milliseconds after the central is
                 // created, before it reaches poweredOn. centralManagerDidUpdateState
