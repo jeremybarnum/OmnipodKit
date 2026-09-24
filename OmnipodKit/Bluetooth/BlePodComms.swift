@@ -22,6 +22,9 @@ class BlePodComms: PodComms {
         }
     }
 
+    /// PODLOAN: a command session is queued or running on the pod link.
+    var isCommandInFlight: Bool { (manager?.pendingSessionCount ?? 0) > 0 }
+
     private var hasLTK: Bool {
         get {
             return (self.podState?.ltk?.count ?? 0) > 0

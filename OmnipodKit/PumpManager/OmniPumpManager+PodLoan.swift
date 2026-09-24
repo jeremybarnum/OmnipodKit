@@ -317,6 +317,13 @@ extension OmniPumpManager {
     /// Deliberately stop bidding for the pod's BLE connection so another controller
     /// (the watch) can hold it uncontested. Pod state, pairing and keys are untouched;
     /// persisted across relaunches. Reverse: reclaimConnection().
+    /// PumpConnectionLendable: the lender waits for this before releasing, so a command in
+    /// flight gets its reply (field 2026-09-24 13:27: a grant released the link mid-command
+    /// and the phone showed "Unable to Reach Pod" until the hand-back read resolved it).
+    public var isDeviceCommandInFlight: Bool {
+        (podComms as? BlePodComms)?.isCommandInFlight ?? false
+    }
+
     public func releaseConnection() {
         let handedOverAt = Date()
         // Interlock mirror FIRST: no window where an auto-reconnect path races the drop.
