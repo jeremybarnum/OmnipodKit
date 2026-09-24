@@ -658,6 +658,9 @@ extension PeripheralManager {
 
 // MARK: - Command session management
 extension PeripheralManager {
+    /// Sessions queued or running — nonzero while a command awaits its reply.
+    var pendingSessionCount: Int { sessionQueue.operationCount }
+
     func runSession(withName name: String , _ block: @escaping () -> Void) {
         self.log.default("Scheduling session %{public}@", name)
 
