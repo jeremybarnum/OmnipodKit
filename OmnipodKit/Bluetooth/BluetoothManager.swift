@@ -137,6 +137,10 @@ class BluetoothManager: NSObject {
     private var takeoverTargetAdverts = 0
     private var wildcardHeard: Set<UUID>?
     private var wildcardPodAdverts = 0
+    /// PODLOAN (2026-09-26): this arming already tried the saved handle (or found none).
+    private var savedHandleTried = false
+    /// The saved handle this arming is connecting through, if any.
+    private var savedHandleInFlight: UUID?
 
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
@@ -163,6 +167,9 @@ class BluetoothManager: NSObject {
                     self.stopScanning()
                 }
                 self.startScanning()
+#if os(watchOS)
+                self.connectSavedHandleIfAny()
+#endif
             } else {
                 // The common case: takeover arms milliseconds after the central is
                 // created, before it reaches poweredOn. centralManagerDidUpdateState
@@ -280,13 +287,65 @@ class BluetoothManager: NSObject {
         retireNoAdvertProbe()
         takeoverArmedAt = Date()
         takeoverTargetAdverts = 0
+        savedHandleTried = false
+        savedHandleInFlight = nil
         scheduleNoAdvertProbe(generation: takeoverGeneration, after: Self.noAdvertProbeDelay)
+    }
+
+    // MARK: PODLOAN saved pod handle (2026-09-26)
+    //
+    // The takeover used to DISCOVER the pod every time, and discovery needs the watch screen on:
+    // with the screen off watchOS runs every third-party scan passive, and a DASH pod carries its
+    // service IDs (0x4024 and its address) only in its SCAN RESPONSE, which a passive scan never
+    // requests (bench 2026-09-26, packet trace: 7 of 7 screen-on discoveries, 0 in ~470 s of
+    // screen-off scanning). A connect by handle needs no discovery — the controller completes it
+    // off the pod's connectable advert, screen on or off, exactly as every mid-loan reclaim does.
+    // So the watch keeps the handle it gets the first time it finds a pod, and every later
+    // takeover of that pod connects by it. The scan stays armed as a backstop.
+    private static let savedHandleKey = "PodLoan.watchPodHandle"
+
+    /// This watch's handle for the pod at `podId`, if it has met that pod before.
+    static func savedHandle(for podId: UInt32) -> UUID? {
+        guard let saved = UserDefaults.standard.dictionary(forKey: savedHandleKey),
+              let address = saved["address"] as? Int, UInt32(truncatingIfNeeded: address) == podId,
+              let uuid = saved["uuid"] as? String else { return nil }
+        return UUID(uuidString: uuid)
+    }
+
+    /// One pod at a time: a new pod's address replaces the old entry.
+    private static func saveHandle(_ uuid: UUID, for podId: UInt32) {
+        UserDefaults.standard.set(["address": Int(podId), "uuid": uuid.uuidString, "savedAt": Date()],
+                                  forKey: savedHandleKey)
+    }
+
+    /// Connect to the takeover target by its saved handle, if this watch has one. Called once per
+    /// arming, when the central is powered on.
+    private func connectSavedHandleIfAny() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        guard !savedHandleTried, let target = loanTakeoverPodId, manager.state == .poweredOn else { return }
+        savedHandleTried = true
+        guard let uuid = BluetoothManager.savedHandle(for: target) else {
+            PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] none saved for pod 0x%x — first contact: finding it needs the watch screen on", target))
+            return
+        }
+        guard let peripheral = manager.retrievePeripherals(withIdentifiers: [uuid]).first else {
+            PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] saved handle %@ for pod 0x%x is unknown to this watch now — falling back to the scan", uuid.uuidString, target))
+            return
+        }
+        PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] connecting to pod 0x%x by saved handle %@ — no discovery needed; the scan stays as a backstop", target, uuid.uuidString))
+        savedHandleInFlight = uuid
+        addPeripheral(peripheral, podAdvertisement: nil)
+        autoConnectIDs.insert(uuid.uuidString)
+        connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: uuid.uuidString)
+        manager.connect(peripheral, options: nil)
     }
 
     private func retireNoAdvertProbe() {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         takeoverGeneration += 1
         wildcardHeard = nil
+        savedHandleTried = true      // only a takeover arming (armNoAdvertProbe) re-opens it
+        savedHandleInFlight = nil
     }
 
     private func scheduleNoAdvertProbe(generation: Int, after delay: TimeInterval) {
@@ -326,6 +385,8 @@ class BluetoothManager: NSObject {
             verdict = "radio heard NOTHING — deaf, or scan results withheld from a backgrounded app"
         } else if wildcardPodAdverts == 0 {
             verdict = "radio works, NO pod advertising within reach"
+        } else if takeoverTargetAdverts > 0 {
+            verdict = "radio works, this pod heard"
         } else {
             verdict = "radio works, pods heard but not this one"
         }
@@ -647,6 +708,9 @@ extension BluetoothManager: CBCentralManagerDelegate {
             } else if !discoveryModeEnabled && loanTakeoverPodId == nil && manager.isScanning {
                 stopScanning()
             }
+#if os(watchOS)
+            connectSavedHandleIfAny()   // no-op unless a takeover armed before poweredOn
+#endif
         }
 
         for device in devices {
@@ -710,7 +774,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 PodLoanConnectClock.podLoanLog(
                     "[SCAN] ad seen: pod \(seenId) rssi \(RSSI) — \(matched ? "MATCHES" : "target is") takeover target 0x\(String(armedTarget, radix: 16))")
                 PodLoanConnectClock.noteAdvert(matchesTarget: matched)
-                if matched { takeoverTargetAdverts += 1 }
+                if matched {
+                    takeoverTargetAdverts += 1
+                    PodLoanConnectClock.podLoanOnPodReached?()
+                }
             }
 
             // PODLOAN: adopt an already-paired pod by its advertised ADDRESS (the phone's
@@ -724,6 +791,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 autoConnectIDs.insert(adopted)
                 connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
                 manager.connect(peripheral, options: nil)
+#if os(watchOS)
+                // Keep this watch's handle, so the next takeover of this pod needs no discovery.
+                BluetoothManager.saveHandle(peripheral.identifier, for: takeoverId)
+                PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] saved %@ for pod 0x%x — later takeovers of this pod connect by it", adopted, takeoverId))
+#endif
             } else if discoveryModeEnabled && peripheral.state == .disconnected && podAdvertisement.pairable {
                 // Connect to any pairable device, during discovery
                 log.default("Connecting to pairable device %{public} in discovery mode", peripheral)
@@ -757,7 +829,19 @@ extension BluetoothManager: CBCentralManagerDelegate {
         PodLoanConnectClock.noteConnect()
 
         log.debug("%{public}@: %{public}@", #function, peripheral)
-        
+
+#if os(watchOS)
+        // A takeover that connected by its saved handle is done looking: disarm the backstop scan.
+        if let inFlight = savedHandleInFlight, peripheral.identifier == inFlight, let target = loanTakeoverPodId {
+            savedHandleInFlight = nil
+            loanTakeoverPodId = nil
+            if manager.isScanning && !discoveryModeEnabled { stopScanning() }
+            BluetoothManager.saveHandle(inFlight, for: target)   // refresh
+            PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] pod 0x%x connected by saved handle — no discovery", target))
+            PodLoanConnectClock.podLoanOnPodReached?()
+        }
+#endif
+
         // Proxy connection events to peripheral manager
         for device in devices where device.manager.peripheral.identifier == peripheral.identifier {
             device.manager.centralManager(central, didConnect: peripheral)
