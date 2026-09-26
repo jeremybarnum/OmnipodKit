@@ -661,10 +661,49 @@ public enum PodLoanConnectClock {
         return _connectCount == 0
     }
 
+    // MARK: Takeover adverts and scan state (2026-09-25)
+    //
+    // Field 2026-09-24: three grants in 19 minutes, and on every one the watch's takeover scan
+    // heard ZERO pod adverts while the phone re-linked the same pod each time. Nothing logged
+    // could say whether the watch's radio was deaf or the pod was silent. These feed every
+    // takeover read line and the failure verdict; the wildcard probe in BluetoothManager
+    // supplies the other half ("does the radio hear ANYTHING?").
+    private static var _scanState = "off"
+    private static var _podAdverts = 0
+    private static var _targetAdverts = 0
+    private static var _probes: [String] = []
+
+    /// What the pod central's scan is doing now: "off", "on(takeover 0x…)", "wildcard", …
+    /// Deliberately NOT cleared by reset() — it describes the radio, not the attempt.
+    public static func noteScan(_ state: String) {
+        lock.lock(); _scanState = state; lock.unlock()
+    }
+
+    /// One DASH advert delivered while a takeover (or reclaim escalation) was armed.
+    public static func noteAdvert(matchesTarget: Bool) {
+        lock.lock()
+        _podAdverts += 1
+        if matchesTarget { _targetAdverts += 1 }
+        lock.unlock()
+    }
+
+    /// One wildcard-probe result, e.g. "+20s:12dev/0pod@active". The last four are kept.
+    public static func noteProbe(_ result: String) {
+        lock.lock()
+        _probes.append(result)
+        if _probes.count > 4 { _probes.removeFirst() }
+        lock.unlock()
+    }
+
+    /// Adverts from the takeover's own pod since the last reset (the grant). Zero at a failed
+    /// takeover is the 2026-09-24 signature: the pod was never heard at all.
+    public static var targetAdvertCount: Int { lock.lock(); defer { lock.unlock() }; return _targetAdverts }
+
     public static func reset() {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
         _lastReason = nil; _reasons = []; _lastCensus = nil; _lastDisconnectReason = nil
+        _podAdverts = 0; _targetAdverts = 0; _probes = []
         lock.unlock()
     }
 
@@ -675,6 +714,7 @@ public enum PodLoanConnectClock {
         lock.lock()
         let c = _lastConnectAt, d = _lastDisconnectAt, n = _connectCount
         let r = _lastReason, trail = _reasons, cen = _lastCensus, dr = _lastDisconnectReason
+        let scan = _scanState, ads = _podAdverts, tads = _targetAdverts, probes = _probes
         lock.unlock()
         guard let start = start else { return "cb: (no anchor)" }
         func rel(_ t: Date?) -> String { t.map { String(format: "+%.1fs", $0.timeIntervalSince(start)) } ?? "never" }
@@ -682,6 +722,7 @@ public enum PodLoanConnectClock {
         let dwhy = dr.map { " · lastDrop=\($0)" } ?? ""
         let tr = trail.isEmpty ? "" : " · trail[\(trail.joined(separator: " "))]"
         let cz = cen.map { " · held[\($0)]" } ?? ""
-        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(dwhy)\(why)\(cz)\(tr)"
+        let pr = probes.isEmpty ? "" : " · probes[\(probes.joined(separator: " "))]"
+        return "cb: didConnect \(rel(c)) (n=\(n)) · didDisconnect \(rel(d))\(dwhy)\(why)\(cz)\(tr) · scan=\(scan) · ads pod=\(ads) target=\(tads)\(pr)"
     }
 }

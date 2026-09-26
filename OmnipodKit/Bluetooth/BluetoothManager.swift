@@ -129,6 +129,15 @@ class BluetoothManager: NSObject {
     /// cleared once adopted.
     private var loanTakeoverPodId: UInt32? = nil
 
+    /// PODLOAN (2026-09-25): the no-advert probe's bookkeeping. The generation retires timers
+    /// left over from an earlier arming; the per-arming tally says whether a probe is needed.
+    /// `wildcardHeard` is non-nil only while a wildcard window is open.
+    private var takeoverGeneration = 0
+    private var takeoverArmedAt: Date?
+    private var takeoverTargetAdverts = 0
+    private var wildcardHeard: Set<UUID>?
+    private var wildcardPodAdverts = 0
+
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
 
@@ -138,6 +147,9 @@ class BluetoothManager: NSObject {
     func beginLoanTakeover(podId: UInt32) {
         managerQueue.async {
             self.loanTakeoverPodId = podId
+#if os(watchOS)
+            self.armNoAdvertProbe()
+#endif
             if self.manager.state == .poweredOn {
                 self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
                 // A scan already running began BEFORE takeover was armed (the plain
@@ -226,6 +238,7 @@ class BluetoothManager: NSObject {
     func escalateLoanReclaim(podId: UInt32) {
         managerQueue.async {
             self.log.default("PODLOAN: reclaim escalation — recreating central + arming scan-adopt for pod 0x%x", podId)
+            self.retireNoAdvertProbe()
             self.loanTakeoverPodId = podId
             self.recreateCentral()
         }
@@ -236,12 +249,98 @@ class BluetoothManager: NSObject {
     /// window. No-op when nothing is armed (an adopt already cleared it).
     func cancelLoanScan() {
         managerQueue.async {
+            self.retireNoAdvertProbe()
             guard self.loanTakeoverPodId != nil else { return }
             self.log.default("PODLOAN: cancelling unfinished reclaim-escalation scan")
             self.loanTakeoverPodId = nil
             if self.manager.state == .poweredOn, self.manager.isScanning, !self.discoveryModeEnabled {
                 self.manager.stopScan()
+                PodLoanConnectClock.noteScan("off")
             }
+        }
+    }
+
+    // MARK: PODLOAN no-advert probe (2026-09-25)
+    //
+    // Field 2026-09-24: three takeovers in 19 minutes heard ZERO pod adverts while the phone
+    // re-linked the same pod each time. The filtered scan cannot say why — under a service
+    // filter only a pod can raise didDiscover, so silence fits a deaf radio and a silent pod
+    // equally. When an armed takeover has heard nothing from its pod after 20 s, drop the
+    // filter for 10 s and count every device heard: none means the radio is deaf (or watchOS
+    // is not delivering scan results to a backgrounded app — the line records the app state),
+    // some means the radio works and the pod is not advertising within reach. A wildcard scan
+    // is a superset, so a pod advert inside the window still adopts through the normal path.
+    // Repeats every 40 s while the takeover stays armed and unheard; a release retires it.
+    private static let noAdvertProbeDelay: TimeInterval = 20
+    private static let noAdvertProbeRepeat: TimeInterval = 40
+    private static let wildcardWindow: TimeInterval = 10
+
+    private func armNoAdvertProbe() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        retireNoAdvertProbe()
+        takeoverArmedAt = Date()
+        takeoverTargetAdverts = 0
+        scheduleNoAdvertProbe(generation: takeoverGeneration, after: Self.noAdvertProbeDelay)
+    }
+
+    private func retireNoAdvertProbe() {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        takeoverGeneration += 1
+        wildcardHeard = nil
+    }
+
+    private func scheduleNoAdvertProbe(generation: Int, after delay: TimeInterval) {
+        managerQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.startWildcardProbe(generation: generation)
+        }
+    }
+
+    private func startWildcardProbe(generation: Int) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        guard generation == takeoverGeneration, let target = loanTakeoverPodId,
+              takeoverTargetAdverts == 0, wildcardHeard == nil else { return }
+        let elapsed = takeoverArmedAt.map { Date().timeIntervalSince($0) } ?? 0
+        guard manager.state == .poweredOn else {
+            PodLoanConnectClock.podLoanLog(String(format: "[SCAN] no advert from pod 0x%x after %.0fs — probe skipped, central state %d", target, elapsed, manager.state.rawValue))
+            PodLoanConnectClock.noteProbe(String(format: "+%.0fs:central%d", elapsed, manager.state.rawValue))
+            return
+        }
+        PodLoanConnectClock.podLoanLog(String(format: "[SCAN] no advert from pod 0x%x after %.0fs — WILDCARD probe: listening to every device for %.0fs", target, elapsed, Self.wildcardWindow))
+        wildcardHeard = []
+        wildcardPodAdverts = 0
+        manager.stopScan()
+        manager.scanForPeripherals(withServices: nil, options: nil)
+        PodLoanConnectClock.noteScan("wildcard")
+        managerQueue.asyncAfter(deadline: .now() + Self.wildcardWindow) { [weak self] in
+            self?.endWildcardProbe(generation: generation, openedAt: elapsed)
+        }
+    }
+
+    private func endWildcardProbe(generation: Int, openedAt elapsed: TimeInterval) {
+        dispatchPrecondition(condition: .onQueue(managerQueue))
+        guard generation == takeoverGeneration, let heard = wildcardHeard else { return }
+        wildcardHeard = nil
+        let appState = PodLoanConnectClock.appStateProbe?() ?? "?"
+        let verdict: String
+        if heard.isEmpty {
+            verdict = "radio heard NOTHING — deaf, or scan results withheld from a backgrounded app"
+        } else if wildcardPodAdverts == 0 {
+            verdict = "radio works, NO pod advertising within reach"
+        } else {
+            verdict = "radio works, pods heard but not this one"
+        }
+        PodLoanConnectClock.podLoanLog(String(format: "[SCAN] wildcard probe (+%.0fs): %d device(s), %d pod advert(s) in %.0fs · app %@ — %@",
+                                              elapsed, heard.count, wildcardPodAdverts, Self.wildcardWindow, appState, verdict))
+        PodLoanConnectClock.noteProbe(String(format: "+%.0fs:%ddev/%dpod@%@", elapsed, heard.count, wildcardPodAdverts, appState))
+        guard manager.state == .poweredOn else { return }
+        manager.stopScan()
+        if loanTakeoverPodId != nil {
+            // Still armed and unheard: back to the filtered scan, and look again later.
+            startScanning()
+            scheduleNoAdvertProbe(generation: generation, after: Self.noAdvertProbeRepeat)
+        } else {
+            // Adopted inside the window — the connect is under way; the scan has no job left.
+            PodLoanConnectClock.noteScan("off")
         }
     }
 #endif
@@ -462,14 +561,17 @@ class BluetoothManager: NSObject {
         // #86 max-instrumentation pass (2026-08-07): scan start/stop was os_log-only, so a slow
         // takeover could never say WHETHER a scan was even running, only that reads kept failing.
         // Route it to the field-visible sink like the [CONFIG] lines already do.
-        PodLoanConnectClock.podLoanLog("[SCAN] start — service \(serviceUUID.uuidString) · reason \(loanTakeoverPodId != nil ? "takeover(0x\(String(loanTakeoverPodId!, radix: 16)))" : (discoveryModeEnabled ? "discovery" : "auto-connect"))")
+        let reason = loanTakeoverPodId != nil ? "takeover(0x\(String(loanTakeoverPodId!, radix: 16)))" : (discoveryModeEnabled ? "discovery" : "auto-connect")
+        PodLoanConnectClock.podLoanLog("[SCAN] start — service \(serviceUUID.uuidString) · reason \(reason)")
         manager.scanForPeripherals(withServices: [serviceUUID], options: nil)
+        PodLoanConnectClock.noteScan("on(\(reason))")
     }
 
     private func stopScanning() {
         log.default("Stop scanning")
         PodLoanConnectClock.podLoanLog("[SCAN] stop")
         manager.stopScan()
+        PodLoanConnectClock.noteScan("off")
     }
 
     // MARK: - Accessors
@@ -504,6 +606,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         log.default("%{public}@: %{public}@", #function, String(describing: central.state.rawValue))
+
+        if central.state != .poweredOn {
+            // A central that is not powered on is not scanning, whatever was last noted.
+            PodLoanConnectClock.noteScan("off(central \(central.state.rawValue))")
+        }
 
         if case .poweredOn = central.state {
             // bluetooth may have reset; update peripheral references
@@ -575,6 +682,14 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.debug("%{public}@: %{public}@, %{public}@", #function, peripheral, advertisementData)
 
+#if os(watchOS)
+        // PODLOAN no-advert probe: count every device the unfiltered window delivers.
+        if wildcardHeard != nil {
+            wildcardHeard?.insert(peripheral.identifier)
+            if PodAdvertisement(advertisementData, podType: podType) != nil { wildcardPodAdverts += 1 }
+        }
+#endif
+
         if let mfgData = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data {
             log.default("[SCAN] ManufacturerData: %{public}@ (%{public}d bytes)", mfgData.hexadecimalString, mfgData.count)
         }
@@ -594,6 +709,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 let matched = podAdvertisement.podId == armedTarget
                 PodLoanConnectClock.podLoanLog(
                     "[SCAN] ad seen: pod \(seenId) rssi \(RSSI) — \(matched ? "MATCHES" : "target is") takeover target 0x\(String(armedTarget, radix: 16))")
+                PodLoanConnectClock.noteAdvert(matchesTarget: matched)
+                if matched { takeoverTargetAdverts += 1 }
             }
 
             // PODLOAN: adopt an already-paired pod by its advertised ADDRESS (the phone's
