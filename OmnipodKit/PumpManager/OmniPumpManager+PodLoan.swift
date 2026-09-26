@@ -166,6 +166,16 @@ extension OmniPumpManager {
     /// PODLOAN (2026-09-26): has this watch met the current pod before — does it hold a saved
     /// handle for the pod's address? False means the takeover must DISCOVER the pod, which needs
     /// the watch screen on (see BluetoothManager's saved-handle notes).
+    /// Idle-screen form: does this watch hold a handle for the pod at `address`? Answers from the
+    /// saved entry only — whether the system still knows the handle shows at takeover.
+    public static func podLoanHasSavedHandle(forPodAddress address: UInt32) -> Bool {
+        #if os(watchOS)
+        return BluetoothManager.savedHandle(for: address) != nil
+        #else
+        return false
+        #endif
+    }
+
     public var podLoanHasSavedHandle: Bool {
         #if os(watchOS)
         guard let address = state.podState?.address else { return false }
@@ -591,6 +601,11 @@ public enum PodLoanConnectClock {
     /// connect landed. From here the rest of the takeover works with the watch screen off; the
     /// glance uses it to tell the user they can lower their wrist. Called on the BLE queue.
     public static var podLoanOnPodReached: (() -> Void)?
+
+    /// PODLOAN (2026-09-26): the takeover could not use a saved handle (none saved, or the watch
+    /// no longer knows it — e.g. after a restart) and must DISCOVER the pod, which needs the
+    /// screen on. Called on the BLE queue.
+    public static var podLoanOnDiscoveryNeeded: (() -> Void)?
 
     /// #86 (2026-08-03): a sink so the BLE layer can reach the WATCH's mirrored log.
     ///

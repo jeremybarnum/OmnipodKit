@@ -326,10 +326,12 @@ class BluetoothManager: NSObject {
         savedHandleTried = true
         guard let uuid = BluetoothManager.savedHandle(for: target) else {
             PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] none saved for pod 0x%x — first contact: finding it needs the watch screen on", target))
+            PodLoanConnectClock.podLoanOnDiscoveryNeeded?()
             return
         }
         guard let peripheral = manager.retrievePeripherals(withIdentifiers: [uuid]).first else {
             PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] saved handle %@ for pod 0x%x is unknown to this watch now — falling back to the scan", uuid.uuidString, target))
+            PodLoanConnectClock.podLoanOnDiscoveryNeeded?()
             return
         }
         PodLoanConnectClock.podLoanLog(String(format: "[HANDLE] connecting to pod 0x%x by saved handle %@ — no discovery needed; the scan stays as a backstop", target, uuid.uuidString))
