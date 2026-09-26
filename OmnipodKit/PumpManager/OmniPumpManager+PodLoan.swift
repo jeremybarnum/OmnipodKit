@@ -163,6 +163,18 @@ extension OmniPumpManager {
         return true
     }
 
+    /// PODLOAN (2026-09-26): has this watch met the current pod before — does it hold a saved
+    /// handle for the pod's address? False means the takeover must DISCOVER the pod, which needs
+    /// the watch screen on (see BluetoothManager's saved-handle notes).
+    public var podLoanHasSavedHandle: Bool {
+        #if os(watchOS)
+        guard let address = state.podState?.address else { return false }
+        return BluetoothManager.savedHandle(for: address) != nil
+        #else
+        return false
+        #endif
+    }
+
     /// PODLOAN #72 (instrumentation): the inherited/live running temp this device now tracks,
     /// if any — for the watch controller's SportLog line at takeover.
     public var podLoanLiveTempBasalDescription: String? {
@@ -574,6 +586,11 @@ public enum PodLoanConnectClock {
     /// The pre-stock build never hit this because it never polled: it parked the takeover
     /// completion and finished on exactly this callback. This restores that contract.
     public static var podLoanOnSessionEstablished: (() -> Void)?
+
+    /// PODLOAN (2026-09-26): the takeover REACHED its pod — its advert was heard or a saved-handle
+    /// connect landed. From here the rest of the takeover works with the watch screen off; the
+    /// glance uses it to tell the user they can lower their wrist. Called on the BLE queue.
+    public static var podLoanOnPodReached: (() -> Void)?
 
     /// #86 (2026-08-03): a sink so the BLE layer can reach the WATCH's mirrored log.
     ///
