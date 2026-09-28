@@ -176,6 +176,12 @@ extension OmniPumpManager {
         #endif
     }
 
+    /// PODLOAN (2026-09-28): the pod's own last status says a bolus is being delivered — the live
+    /// answer at a controller's first read, which a copy made before the bolus cannot give.
+    public var podLoanPodIsBolusing: Bool {
+        state.podState?.lastDeliveryStatusReceived?.bolusing ?? false
+    }
+
     public var podLoanHasSavedHandle: Bool {
         #if os(watchOS)
         guard let address = state.podState?.address else { return false }
