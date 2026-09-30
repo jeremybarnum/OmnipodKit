@@ -1864,7 +1864,11 @@ extension BluetoothManager: CBCentralManagerDelegate {
             // nothing here — the address is the only identifier both devices agree on. Match it,
             // record THIS device's identifier as the pod's, and connect; the session
             // re-establishes from the granted keys.
-            if let takeoverId = loanTakeoverPodId, podAdvertisement.podId == takeoverId, peripheral.state == .disconnected {
+            // O5 adverts carry the controller id, not the pod address; the scan filter is already
+            // derived from it, so match on that.
+            let advertMatchesLoanPod = podAdvertisement.podId == loanTakeoverPodId
+                || (podType.isO5 && podAdvertisement.pdmId != nil && podAdvertisement.pdmId == uuidPdmId)
+            if let takeoverId = loanTakeoverPodId, advertMatchesLoanPod, peripheral.state == .disconnected {
                 let adopted = peripheral.identifier.uuidString
                 log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
                 // KEEP THE MARKER UNTIL THE CONNECT IS CONFIRMED.

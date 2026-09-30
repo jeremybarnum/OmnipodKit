@@ -32,6 +32,7 @@ struct PodAdvertisement {
     /// from the advertisement so a watch can find an already-paired pod by address —
     /// CoreBluetooth peripheral UUIDs are per-device and can't be reused across a loan.
     var podId: UInt32?
+    var pdmId: UInt32?
 
     var pairable: Bool {
         if podType.isDash {
@@ -110,6 +111,7 @@ struct PodAdvertisement {
                 return nil
             }
 
+            self.pdmId = decodedPdmId
             print("O5 advertisement PDM id: \(decodedPdmId)")
 
         default:
