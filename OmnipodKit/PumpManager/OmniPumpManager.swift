@@ -2632,7 +2632,7 @@ extension OmniPumpManager: PumpManager {
 
     public func ensureCurrentPumpData(completion: ((Date?) -> Void)?) {
         #if targetEnvironment(simulator)
-        // SIM LOAN HARNESS (#61): a real status fetch needs the radio, so in the simulator every
+        // SIM LOAN HARNESS: a real status fetch needs the radio, so in the simulator every
         // "pump data too old" fetch failed forever — the phone's own loop errored every cycle
         // (pumpDataTooOld) and the loan reclaim verification (which requires lastSync to ADVANCE
         // past the reclaim start) could never succeed. Fake the successful round-trip the same

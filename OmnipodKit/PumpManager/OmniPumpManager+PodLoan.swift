@@ -2,8 +2,8 @@
 //  OmniPumpManager+PodLoan.swift
 //  OmnipodKit
 //
-//  PODLOAN — the single ringfenced pod-loan seam file for OmnipodKit (RULINGS.md R11:
-//  hardware-module deviations live in ONE +Feature extension file per module; audit =
+//  PODLOAN — the single ringfenced pod-loan seam file for OmnipodKit (hardware-module
+//  deviations live in ONE +Feature extension file per module; audit =
 //  read this file + `grep -rn "// PODLOAN" OmnipodKit/`). Loop-side consumer:
 //  Loop/docs/DESIGN_LOAN_PROTOCOL_V2.md §10 (PodLoanWatchController).
 //
@@ -18,7 +18,7 @@
 //
 //  Phone-side surface: the PumpConnectionLendable conformance below — the phone deliberately stops
 //  bidding for the pod's single BLE connection at grant and re-arms at reclaim, with
-//  the C5 record truncation at the handover stamp (R2).
+//  the C5 record truncation at the handover stamp.
 //
 //  COMPLETE FOOTPRINT — audit the whole feature with:  grep -rn "PODLOAN" OmnipodKit/
 //   • This file — all behavior.
@@ -37,7 +37,7 @@ import LoopKit
 
 extension OmniPumpManager {
 
-    /// The pod's cumulative-delivered odometer as last reported (R12: the audit, never
+    /// The pod's cumulative-delivered odometer as last reported (the audit, never
     /// the source). Freshen with podLoanReadStatus before snapshotting (OQ-5).
     public var podLoanInsulinDelivered: Double? {
         return state.podState?.lastInsulinMeasurements?.delivered
@@ -244,7 +244,7 @@ extension OmniPumpManager {
         (podComms as? BlePodComms)?.lastSqnResync.map { ($0.at, max(0, $0.pods - $0.ours)) }
     }
 
-    /// PumpConnectionLendable's books-dirty primitive (phone mirror, R40(a)): the SQN
+    /// PumpConnectionLendable's books-dirty primitive (phone mirror): the SQN
     /// resync stamp, protocol-shaped so Loop reads it without importing OmnipodKit.
     public var podLoanLastForeignSessionAt: Date? {
         podLoanLastSqnResync?.at
@@ -266,7 +266,7 @@ extension OmniPumpManager: PumpConnectionLendable {
     }
 }
 
-// MARK: - PODLOAN #86: an independent clock for BLE connect/disconnect
+// MARK: - PODLOAN: an independent clock for BLE connect/disconnect
 
 /// The takeover ladder polls `podLoanConnectionStateDescription` from a timer it schedules
 /// itself. On 2026-07-31 that turned out to be unfalsifiable as a diagnostic: watchOS defers a
@@ -287,7 +287,7 @@ public enum PodLoanConnectClock {
     private static var _connectCount = 0
     private static var _lastReason: String?
     private static var _reasons: [String] = []
-    /// #86: kept SEPARATE from _lastReason. In a retry storm didFailToConnect fires >=4x/sec and
+    /// Kept SEPARATE from _lastReason. In a retry storm didFailToConnect fires >=4x/sec and
     /// both overwrote one field + flooded the 12-slot trail, evicting the one datum that says why
     /// an ESTABLISHED link died (observed 2026-08-01: epoch 111's trail was 12x "x#11" and the
     /// disconnect reasons were unrecoverable). Disconnects are rare; failures are the flood.
@@ -298,7 +298,7 @@ public enum PodLoanConnectClock {
     private static var _lastCode11At: Date?
 
     /// Set by the app so every BLE event can record what execution state we were in when it
-    /// fired. #86: the flapping and the polling deferral were BOTH only ever observed overnight,
+    /// fired. The flapping and the polling deferral were BOTH only ever observed overnight,
     /// wrist-down. Sport Mode is the opposite regime — awake, moving, wrist live — and watchOS
     /// schedules a moving workout app differently. Without this stamp we cannot tell whether a
     /// drop belongs to the regime that actually matters.
