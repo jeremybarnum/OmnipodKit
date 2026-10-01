@@ -217,6 +217,8 @@ extension OmniPumpManager: PumpDeliveryOdometer {
         return (measured.delivered, measured.validTime)
     }
 
+    public var deliveryPulseUnits: Double { Pod.pulseSize }
+
     /// A real status read, bypassing the freshness shortcut in ensureCurrentPumpData.
     public func refreshDeliveredUnits(completion: @escaping (Bool) -> Void) {
         #if targetEnvironment(simulator)
