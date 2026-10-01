@@ -93,6 +93,10 @@ public class OmniPumpManager: RileyLinkPumpManager {
         basalDeliveryState(for: state) == .pumpInoperable
     }
 
+    public var localizedInoperableDescription: String? {
+        state.podState?.localizedFaultDescription
+    }
+
     // This string should match the PumpManagerIdentifier string.
     public let pluginIdentifier: String = "Omni"
 

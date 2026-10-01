@@ -276,6 +276,30 @@ final class DeviceHandoffTests: XCTestCase {
         XCTAssertFalse(ConnectClock.isWedge(lastCode11At: nil, lastConnectAt: start.addingTimeInterval(3), since: start))
     }
 
+    // MARK: - Fault text for the host
+
+    func faulted(code: UInt8) throws -> PodState {
+        var pod = makePodState()
+        let hex = String(format: "020d000000060000%02x000003ff0000000003a20386a0", code)
+        pod.fault = try DetailedStatus(encodedData: Data(hexadecimalString: hex)!)
+        return pod
+    }
+
+    func testTheFaultTextIsTheFaultAlarmsTitle() throws {
+        XCTAssertNil(makePodState().localizedFaultDescription, "a working pod has no fault text")
+        XCTAssertEqual(try faulted(code: 0x14).localizedFaultDescription, "Occlusion Detected")
+        XCTAssertEqual(try faulted(code: 0x18).localizedFaultDescription, "Empty Reservoir")
+        XCTAssertEqual(try faulted(code: 0x1C).localizedFaultDescription, "Pod Expired")
+        XCTAssertEqual(try faulted(code: 0x8F).localizedFaultDescription, "Critical Pod Fault 143",
+                       "the fault code the pod reported")
+    }
+
+    func testAFaultWithNoCodeStillHasText() {
+        var pod = makePodState()
+        pod.setupProgress = .activationTimeout
+        XCTAssertEqual(pod.localizedFaultDescription, "Pod Error")
+    }
+
     // MARK: -
 
     func status(_ deliveryStatus: DeliveryStatus, bolusNotDelivered: Double = 0) -> StatusResponse {

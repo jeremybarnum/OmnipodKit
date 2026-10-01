@@ -231,6 +231,13 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
         return fault != nil || setupProgress == .activationTimeout || setupProgress == .podIncompatible
     }
 
+    /// What a faulted pod's alarm is titled; "Pod Error" when the pod gave no fault code.
+    var localizedFaultDescription: String? {
+        guard isFaulted else { return nil }
+        return fault?.faultEventCode.notificationTitle
+            ?? LocalizedString("Pod Error", comment: "Status highlight message for other alarm.")
+    }
+
     /// Does this pod have no silent beep type available (is noBeepNonCancel non-silent)?
     /// So far this has only been found in the newer the Omnipod 5 "black dot" pods
     /// which have had firmware verision starting with "12.0". Assume later firmware
