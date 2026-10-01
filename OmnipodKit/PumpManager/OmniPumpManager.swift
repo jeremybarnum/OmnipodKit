@@ -2866,6 +2866,15 @@ extension OmniPumpManager: PumpManager {
             return
         }
 
+        #if targetEnvironment(simulator)
+        // SIM HAND-OFF HARNESS: no radio. Cancelling with no temp running changes nothing on the pod,
+        // and a grant cancels before it releases.
+        if duration < .ulpOfOne, podState.unfinalizedTempBasal == nil {
+            completion(nil)
+            return
+        }
+        #endif
+
         // Round to nearest supported rate
         let rate = roundToSupportedBasalRate(unitsPerHour: unitsPerHour)
 
