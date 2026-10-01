@@ -751,14 +751,11 @@ class BlePodComms: PodComms {
         }
         if manager == nil, BluetoothManager.connectOnDemandEnabled, let bleId = podState?.bleIdentifier {
             self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
-#if os(watchOS)
             if self.manager == nil {
-                // init's connectToDevice ran before the central was poweredOn, so the device entry
-                // may not exist yet on the first read — re-issue the retrieve now (no-op if it does).
+                // A first read can beat the poweredOn recovery of the device entry; retrieve it now.
                 bluetoothManager.connectToDevice(uuidString: bleId)
                 self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
             }
-#endif
             if self.manager != nil {
                 log.default("[connectOnDemand] adopted PeripheralManager for %{public}@ while disconnected", bleId)
             }
