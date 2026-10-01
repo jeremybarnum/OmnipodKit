@@ -16,8 +16,7 @@
 //  the loan journal's provenance tags. This file adds ONLY the outward report; the
 //  chase timing and journal consequences live in app code (never in the driver).
 //
-//  Phone-side surface: the PumpConnectionLendable conformance below (ported from the
-//  OmniBLE fork's pod-loan branch @ eb8f6c3/c6c37f9) — the phone deliberately stops
+//  Phone-side surface: the PumpConnectionLendable conformance below — the phone deliberately stops
 //  bidding for the pod's single BLE connection at grant and re-arms at reclaim, with
 //  the C5 record truncation at the handover stamp (R2).
 //
@@ -89,10 +88,10 @@ extension OmniPumpManager {
     /// round-trip succeeded.
     public func podLoanReadStatus(completion: @escaping (Bool) -> Void) {
         #if targetEnvironment(simulator)
-        // SIM LOAN HARNESS (#61, 2026-08-07). The simulator has no radio, so a real status
+        // SIM LOAN HARNESS. The simulator has no radio, so a real status
         // round-trip can never complete and every loan died at the takeover ladder — which made
         // the entire loan lifecycle (glance during a loan, carb flow during a loan, hand-back)
-        // untestable off-wrist. Three of 2026-08-07's field failures lived exactly there.
+        // untestable off-wrist.
         //
         // This is the ONE seam a simulated takeover needs: complete the read after a plausible
         // connect latency, and stamp the odometer measurement the ACTIVE transition requires
@@ -172,7 +171,7 @@ extension OmniPumpManager {
     /// turns true (distinct from `isConnectionReleased`, the loan flag, which clears at reclaim).
     public var isConnectionReady: Bool {
         #if targetEnvironment(simulator)
-        // SIM LOAN HARNESS (#61): no radio -> no peripheral ever reaches .connected, which
+        // SIM LOAN HARNESS: no radio -> no peripheral ever reaches .connected, which
         // starves the phone's reclaim verification (PodLoanPhoneController gates the verifying
         // status read on this) and pins every post-loan settle window at its 5-minute ceiling.
         // A jump-started sim pod is by definition "home", so say so.
@@ -186,8 +185,7 @@ extension OmniPumpManager {
     /// `podLoanReadStatus` returns a bare Bool, so a run of failed reads could not
     /// distinguish "peripheral wedged in .disconnecting" (the E4-v1 poisoning signature)
     /// from "never reached .connected" from "connected but the status read failed" —
-    /// three different bugs that look identical from outside (2026-07-22: three theories
-    /// raised and falsified against exactly this blind spot). Read-only.
+    /// three different bugs that look identical from outside. Read-only.
     /// PumpConnectionLendable. The protocol default returns nil, which is what produced
     /// "ble: no diagnostics from the pump manager" on both phone settle-ceiling failures.
     public func connectionDiagnostics() -> String? {
@@ -304,7 +302,7 @@ public enum PodLoanConnectClock {
     /// wrist-down. Sport Mode is the opposite regime — awake, moving, wrist live — and watchOS
     /// schedules a moving workout app differently. Without this stamp we cannot tell whether a
     /// drop belongs to the regime that actually matters.
-    /// #86 (2026-08-03): the pod BLE stack's own "encrypted session is live" event, republished
+    /// The pod BLE stack's own "encrypted session is live" event, republished
     /// for the watch takeover. THE point of this hook is that it fires from
     /// BlePodComms.completeConfiguration AFTER sendHello / enableNotifications /
     /// establishNewSession have all succeeded — i.e. it is the stack telling us the link is
@@ -318,11 +316,11 @@ public enum PodLoanConnectClock {
     /// value, so nothing was ever sent, and the pod hung up on the silent link after its idle
     /// timeout — seven connections, each 3.5-3.6 s, metronomic.
     ///
-    /// The pre-stock build never hit this because it never polled: it parked the takeover
+    /// An earlier driver never hit this because it never polled: it parked the takeover
     /// completion and finished on exactly this callback. This restores that contract.
     public static var podLoanOnSessionEstablished: (() -> Void)?
 
-    /// #86 (2026-08-03): a sink so the BLE layer can reach the WATCH's mirrored log.
+    /// A sink so the BLE layer can reach the WATCH's mirrored log.
     ///
     /// OmnipodKit logs via os_log, which goes to the system log and is invisible in the
     /// g7watch file log the field analysis actually reads. A [CONFIG] diagnostic added on
@@ -398,7 +396,7 @@ public enum PodLoanConnectClock {
         lock.unlock()
     }
 
-    // MARK: The BLE-wedge signature (2026-08-22, from the pure/SportMode line's field case)
+    // MARK: The BLE-wedge signature
 
     /// The decision as a pure function, so it is testable without touching the statics.
     ///

@@ -166,7 +166,7 @@ class BluetoothManager: NSObject {
     /// cleared once adopted.
     /// The takeover/reclaim scan marker.
     ///
-    /// INSTRUMENTED 2026-08-18 because it went nil underneath a live reclaim ladder and nobody
+    /// INSTRUMENTED because it went nil underneath a live reclaim ladder and nobody
     /// could say who cleared it. connectOnDemand consults it (:881) to decide whether to leave a
     /// running scan alone or stop and replace it with its own 4-second one, so a silent clear
     /// hands the pod's discovery scan to a different owner mid-ladder. Three writers exist —
@@ -1441,7 +1441,7 @@ class BluetoothManager: NSObject {
             //
             // Checked on managerQueue, where the marker is authoritative — no cross-queue race.
             if site == "connectError", self.loanTakeoverPodId != nil {
-                // ONLY CLAIM A RIDING CONNECT IF ONE EXISTS (2026-08-20). The first cut printed
+                // ONLY CLAIM A RIDING CONNECT IF ONE EXISTS. The first cut printed
                 // "LEFT RIDING" unconditionally — including for L11, where runCommand's entry guard
                 // threw before the command block ran, so no connect() was ever issued and there was
                 // nothing to protect. The guard was correct and the message was a lie: it read as
@@ -1476,13 +1476,13 @@ class BluetoothManager: NSObject {
             // attention UUID for O5 — which by design only fires when a pod is FAULTED. A healthy pod
             // never advertises it, so the takeover scan could not succeed at any distance or with any
             // amount of patience: 14 reads, 113 s, `no-peripheral · didConnect never (n=0)`, every
-            // time. The fork's older driver had no low-power mode and always scanned the main
+            // time. The older driver had no low-power mode and always scanned the main
             // service, which is why this only appeared after adopting the newer OmnipodKit.
             let reason = discoveryModeEnabled ? "discovery/pairing" : "loan-takeover"
             services = [serviceUUID]
             options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
             log.default("Start scanning (%{public}@ filter=%{public}@)", reason, serviceUUID.uuidString)
-            // WHERE THE FILTER CAME FROM (2026-08-20). `podScanServiceUUID` has two branches — an O5
+            // WHERE THE FILTER CAME FROM. `podScanServiceUUID` has two branches — an O5
             // UUID DERIVED from uuidPdmId, and the pod profile's static advertisement service — and a
             // wrong branch produces a scan that cannot match at any distance, for any duration, with no
             // symptom other than silence. That is indistinguishable from deafness in the log, and it is
@@ -1926,11 +1926,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        // WIRED 2026-08-22. PodLoanConnectClock was ported with noteConnect/noteDisconnect/
-        // noteFailToConnect and ZERO call sites, so every `cb:` field ever printed on this
-        // branch read "didConnect never (n=0)" structurally — the instrument existed and was
-        // never attached to the thing it measures. Any pre-2026-08-22 `cb:` field in this
-        // branch's logs is void; the intent ledger (a separate system) remains valid.
+        // The connect clock's only feed: without these calls every `cb:` field reads
+        // "didConnect never (n=0)" whatever the radio did.
         PodLoanConnectClock.noteConnect()
         dispatchPrecondition(condition: .onQueue(managerQueue))
 

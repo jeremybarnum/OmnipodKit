@@ -81,7 +81,7 @@ class BlePodComms: PodComms {
     // gates on peripheral.identifier == podState.bleIdentifier) recognizes it.
     func omnipodDidAdoptLoanPod(uuidString: String) {
         log.default("PODLOAN: adopted pod bleIdentifier %{public}@", uuidString)
-        // REMEMBER IT (2026-08-20). Discovery is NAME RESOLUTION, not authentication: it
+        // REMEMBER IT. Discovery is NAME RESOLUTION, not authentication: it
         // translates a pod id we already know into a CoreBluetooth handle this device can
         // use. The handle is per-device, so the phone's copy in the grant is useless here —
         // but OUR copy is reusable for every later loan with this same pod, and the driver
@@ -143,12 +143,12 @@ class BlePodComms: PodComms {
     func rearmConnection() {
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
-            // DIAL, don't just re-arm (2026-08-23). Under connect-on-demand this method issued
+            // DIAL, don't just re-arm. Under connect-on-demand this method issued
             // no connect at all: connectToDevice only dials an UNKNOWN peripheral (ours is
             // always known by reclaim time), updateConnections→autoReconnect returns
             // immediately when connectOnDemandEnabled, and the settle's verification read is
             // gated on isConnectionReady — so nothing dialed, and the 20 s escalation's
-            // scan-adopt was what actually connected. Every measured settle on this build:
+            // scan-adopt was what actually connected. Every measured settle before this:
             // 24-28 s, pod advertising at -50 dBm the whole wait, census showing
             // scanning=false / zero connect intents until escalation. The command path's
             // fresh-discovery connect is the measured dial (~2-6 s cold), so issue it here
@@ -408,7 +408,7 @@ class BlePodComms: PodComms {
             if podState != nil {
                 let podSqn = keys.synchronizedEapSqn.toInt()
                 log.bleDebug("@@@ Updating EAP SQN to: %d", podSqn)
-                // THE TRUST SIGNAL (seize prerequisite 2, 2026-08-30). An SQN resync means the
+                // THE TRUST SIGNAL. An SQN resync means the
                 // pod's session counter is ahead of ours: every session establishment
                 // increments it, so the delta counts sessions made by a controller that was
                 // not us since our last contact. During an ordinary loan that controller is
@@ -960,10 +960,8 @@ extension BlePodComms: PeripheralManagerDelegate {
                 needsSessionEstablishment = false
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
-                // #86 (2026-08-03): this catch is why the handshake failure has been invisible
-                // for three days — it swallows the error and returns normally, so callers cannot
-                // tell a failed session from a successful one. Identical in the pre-stock build,
-                // so this is inherited upstream behaviour rather than a port regression. Surface
+                // This catch swallows the error and returns normally, so callers cannot tell a
+                // failed session from a successful one (inherited upstream behaviour). Surface
                 // it: sendHello / enableNotifications / establishNewSession each fail differently
                 // and only one of them is a crypto/counter problem.
                 PodLoanConnectClock.podLoanLog("[CONFIG] session handshake FAILED: \(error)")
