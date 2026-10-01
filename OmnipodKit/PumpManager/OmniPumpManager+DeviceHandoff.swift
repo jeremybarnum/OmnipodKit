@@ -186,6 +186,14 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         podComms is BlePodComms && state.podState != nil && state.podState?.bleIdentifier == nil
     }
 
+    /// An adopter searches for a BLE pod unless this controller has a handle of its own for it.
+    public static func takeControlNeedsSearch(adopting configuration: SharedDeviceConfiguration) -> Bool {
+        guard let shared = OmniPumpManagerState(rawValue: configuration.state),
+              shared.podType == dashType || shared.podType == omnipod5Type,
+              let pod = shared.podState else { return false }
+        return PeripheralHandleCache.identifier(forPodAddress: pod.address) == nil
+    }
+
     public var hostRadioNeedsReset: Bool {
         ConnectClock.wedgeSignature(since: ConnectClock.attemptStartedAt)
     }

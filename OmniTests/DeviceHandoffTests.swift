@@ -143,6 +143,15 @@ final class DeviceHandoffTests: XCTestCase {
         XCTAssertEqual(adopter.podState?.bleIdentifier, watchHandle)
     }
 
+    /// Asked of a standing copy before Start: only a pod this controller holds no handle for.
+    func testAnExportSaysWhetherAdoptingItWillSearch() {
+        XCTAssertTrue(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState())))
+        PeripheralHandleCache.store(watchHandle, forPodAddress: address)
+        XCTAssertFalse(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState())))
+        XCTAssertFalse(OmniPumpManager.takeControlNeedsSearch(
+            adopting: SharedDeviceConfiguration(managerIdentifier: "Omni", asOf: Date(), state: [:])))
+    }
+
     func testAHandleThatNeverConnectedIsForgottenAtRelease() throws {
         PeripheralHandleCache.store(watchHandle, forPodAddress: address)
         _ = try adopt(export(makeState()))
