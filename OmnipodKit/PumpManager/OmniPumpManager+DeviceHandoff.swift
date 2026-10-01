@@ -159,13 +159,11 @@ extension OmniPumpManager: ExclusiveDeviceControl {
     /// Goes looking for the pod by address instead of waiting to hear it.
     @discardableResult
     public func escalateTakeControl() -> String? {
-        guard let address = state.podState?.address else {
-            return "no pod address — nothing to escalate"
-        }
+        guard let address = state.podState?.address, let ble = podComms as? BlePodComms else { return nil }
         if state.podConnectionReleased {
             resumeControl()
         }
-        (podComms as? BlePodComms)?.escalateTakeover(podId: address)
+        ble.escalateTakeover(podId: address)
         return String(format: "scan-adopt armed for pod 0x%X", address)
     }
 
