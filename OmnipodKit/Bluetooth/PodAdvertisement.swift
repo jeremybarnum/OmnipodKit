@@ -28,9 +28,8 @@ struct PodAdvertisement {
 
     var serviceUUIDs: [CBUUID]
 
-    /// PODLOAN: the pod's advertised id (== the pod's message address for DASH), decoded
-    /// from the advertisement so a watch can find an already-paired pod by address —
-    /// CoreBluetooth peripheral UUIDs are per-device and can't be reused across a loan.
+    /// The advertised pod id (DASH: the pod's address) and controller id (O5), so another device
+    /// can find an already-paired pod; CoreBluetooth peripheral UUIDs are per device.
     var podId: UInt32?
     var pdmId: UInt32?
 
@@ -86,7 +85,7 @@ struct PodAdvertisement {
                 return nil
             }
 
-            self.podId = decodedPodId   // PODLOAN: expose for cross-device address matching
+            self.podId = decodedPodId
             print("DASH advertisement: pod id: \(decodedPodId), lot: \(decodedLotNo), seq: \(decodedSeqNo)")
 
         case omnipod5Type:

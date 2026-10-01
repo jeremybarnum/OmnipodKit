@@ -20,16 +20,18 @@ public struct OmniPumpManagerState: RawRepresentable, Equatable {
     var isOnboarded: Bool = false
 
     // XXX still needs be declared public with the current Trio implementation
-    // PODLOAN: internal(set) so the ringfenced +PodLoan file can truncate the running
-    // temp basal's RECORD at the moment the pod changes hands. The pod keeps delivering
-    // the temp it was given; what must not happen is both controllers booking the same
-    // minutes. Was private(set).
-    internal(set) public var podState: PodState?
+    public private(set) var podState: PodState?
 
-    // PODLOAN: true while the pod's BLE connection is deliberately released
-    // (loaned to another controller). Persisted so an app relaunch mid-loan cannot
-    // silently re-arm the connection and steal the pod back.
-    public var podConnectionReleased: Bool = false
+    /// Control of the pod is released to another controller (ExclusiveDeviceControl). Persisted,
+    /// so a relaunch does not take it back.
+    var podConnectionReleased: Bool = false
+
+    /// Built from another controller's export (DeviceConfigurationSharing).
+    var configuredByAnotherController: Bool = false
+
+    /// Control was released with a bolus or temp basal in flight. The other controller owns those
+    /// records from then on, so taking control drops this manager's copies.
+    var inFlightDosesInheritedAway: Bool = false
 
     // State should only be modifiable by PodComms
     mutating func updatePodStateFromPodComms(_ podState: PodState?) {
@@ -341,7 +343,9 @@ public struct OmniPumpManagerState: RawRepresentable, Equatable {
 
         self.podAttachmentConfirmed = rawValue["podAttachmentConfirmed"] as? Bool ?? false
 
-        self.podConnectionReleased = rawValue["podConnectionReleased"] as? Bool ?? false   // PODLOAN
+        self.podConnectionReleased = rawValue["podConnectionReleased"] as? Bool ?? false
+        self.configuredByAnotherController = rawValue["configuredByAnotherController"] as? Bool ?? false
+        self.inFlightDosesInheritedAway = rawValue["inFlightDosesInheritedAway"] as? Bool ?? false
 
         self.initialConfigurationCompleted = rawValue["initialConfigurationCompleted"] as? Bool ?? true
 
@@ -395,7 +399,9 @@ public struct OmniPumpManagerState: RawRepresentable, Equatable {
             "confirmationBeeps": confirmationBeeps.rawValue,
             "activeAlerts": activeAlerts.map { $0.rawValue },
             "podAttachmentConfirmed": podAttachmentConfirmed,
-            "podConnectionReleased": podConnectionReleased,   // PODLOAN
+            "podConnectionReleased": podConnectionReleased,
+            "configuredByAnotherController": configuredByAnotherController,
+            "inFlightDosesInheritedAway": inFlightDosesInheritedAway,
             "acknowledgedTimeOffsetAlert": acknowledgedTimeOffsetAlert,
             "alertsWithPendingAcknowledgment": alertsWithPendingAcknowledgment.map { $0.rawValue },
             "initialConfigurationCompleted": initialConfigurationCompleted,
