@@ -126,6 +126,13 @@ public class OmniPumpManager: RileyLinkPumpManager {
         super.init(rileyLinkDeviceProvider: rileyLinkDeviceProvider)
 
         finishInit(podType: state.podType)
+
+        // PODLOAN: honor a persisted mid-loan release. BlePodComms auto-connects at
+        // construction from podState.bleIdentifier; a relaunch during a loan must not
+        // steal the pod back from the watch, so disarm immediately.
+        if state.podConnectionReleased {
+            (podComms as? BlePodComms)?.releaseConnection()
+        }
     }
 
     // Common initialization used after all mandatory fields are initialized
@@ -141,6 +148,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
             }
             .store(in: &cancellables)
 
+#if os(iOS) // watchOS: no UIApplication lifecycle notifications or audio keepalive; the watch host owns process lifetime
         /// Register for app foreground / background notifications needed for at least Pod Keep Alive timer based options
         if !podType.isEros {
             let nc = NotificationCenter.default
@@ -157,6 +165,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
                 object: nil
             )
         }
+#endif
 
         /// Initialize or disable the podKeepAlive state as needed
         self.podKeepAlive = state.podKeepAlive
@@ -166,6 +175,9 @@ public class OmniPumpManager: RileyLinkPumpManager {
         guard let state = OmniPumpManagerState(rawValue: rawState) else {
             return nil
         }
+        // Timing marks: on a watch just powered up this initializer has taken 4, 18 and 40 s
+        // (0.1 s otherwise), all of it before the pod's own Bluetooth manager is created.
+        PodLoanConnectClock.podLoanLog("[init] state decoded")
 
         let deviceProvider: RileyLinkBluetoothDeviceProvider
         if let connectionManagerState = state.rileyLinkConnectionManagerState {
@@ -173,13 +185,17 @@ public class OmniPumpManager: RileyLinkPumpManager {
         } else {
             deviceProvider = RileyLinkBluetoothDeviceProvider(autoConnectIDs: [])
         }
+        PodLoanConnectClock.podLoanLog("[init] RileyLink provider created")
 
         self.init(state: state, rileyLinkDeviceProvider: deviceProvider)
+        PodLoanConnectClock.podLoanLog("[init] pump manager constructed")
 
         deviceProvider.delegate = self
     }
 
-    private var podComms: PodComms {
+    // PODLOAN: internal (was private) so the ringfenced +PodLoan file can drive
+    // the BLE layer's release/re-arm.
+    internal var podComms: PodComms {
         get {
             return lockedPodComms.value
         }
@@ -206,7 +222,9 @@ public class OmniPumpManager: RileyLinkPumpManager {
         return lockedState.value
     }
 
-    private func setState(_ changes: (_ state: inout OmniPumpManagerState) -> Void) -> Void {
+    // PODLOAN: internal (was private) so the ringfenced +PodLoan file can set the
+    // release flag and apply the C5 record truncation.
+    internal func setState(_ changes: (_ state: inout OmniPumpManagerState) -> Void) -> Void {
         return setStateWithResult(changes)
     }
 
@@ -442,6 +460,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
         }
     }
 
+#if os(iOS) // watchOS: SilentTune (audio keepalive; depends on PumpManagerUI) is excluded from the watchOS target
     private let silentTune = SilentTune()
 
     @objc func appMovedToBackground() {
@@ -454,6 +473,7 @@ public class OmniPumpManager: RileyLinkPumpManager {
     @objc func appMovedToForeground() {
         silentTune.stopPlayer()
     }
+#endif
 
 
     // MARK: - RileyLink specific vars and funcs
@@ -1019,6 +1039,7 @@ extension OmniPumpManager {
         return false
     }
 
+#if os(iOS) // watchOS: ReservoirLevelHighlightState is declared in PumpManagerUI (excluded); only UI consumes this property
     var reservoirLevelHighlightState: ReservoirLevelHighlightState? {
         guard let reservoirLevel = reservoirLevel else {
             return nil
@@ -1037,6 +1058,7 @@ extension OmniPumpManager {
             }
         }
     }
+#endif
 
     func buildPumpLifecycleProgress(for state: OmniPumpManagerState) -> PumpLifecycleProgress? {
         switch podCommState {
@@ -1649,6 +1671,14 @@ extension OmniPumpManager {
 
     // Used to serialize a set of Pod Commands for a given session - vectors to correct version
     private func runSession(withName name: String, _ block: @escaping (_ result: PodComms.SessionRunResult) -> Void) {
+        // PODLOAN: a pump whose connection has been released takes no commands. The flag is set
+        // only by releaseConnection() — the lender at grant, the watch at hand-back teardown — so
+        // on a borrowing watch this never fires during a loan.
+        if state.podConnectionReleased {
+            log.default("PODLOAN: '%{public}@' refused — pod connection released (on loan)", name)
+            block(.failure(.podNotConnected))
+            return
+        }
         if let blePodComms = self.podComms as? BlePodComms {
             blePodComms.bleRunSession(withName: name, block)
         } else if let erosPodComms = self.podComms as? ErosPodComms {
@@ -2601,6 +2631,23 @@ extension OmniPumpManager: PumpManager {
     }
 
     public func ensureCurrentPumpData(completion: ((Date?) -> Void)?) {
+        #if targetEnvironment(simulator)
+        // SIM LOAN HARNESS (#61): a real status fetch needs the radio, so in the simulator every
+        // "pump data too old" fetch failed forever — the phone's own loop errored every cycle
+        // (pumpDataTooOld) and the loan reclaim verification (which requires lastSync to ADVANCE
+        // past the reclaim start) could never succeed. Fake the successful round-trip the same
+        // way the takeover seam does: stamp a fresh odometer measurement and report now.
+        if state.podState != nil {
+            setState { state in
+                let delivered = state.podState?.lastInsulinMeasurements?.delivered
+                    ?? state.podState?.setupUnitsDelivered ?? Pod.primeUnits
+                state.podState?.lastInsulinMeasurements = PodInsulinMeasurements(
+                    insulinDelivered: delivered, reservoirLevel: nil, validTime: Date())
+            }
+            completion?(Date())
+            return
+        }
+        #endif
         let shouldFetchStatus = setStateWithResult { (state) -> Bool? in
             guard state.hasActivePod else {
                 return nil // No active pod
@@ -3337,6 +3384,11 @@ extension OmniPumpManager: PodCommsDelegate {
 
     // Not used for Eros pods
     func podCommsDidEstablishSession(_ podComms: PodComms) {
+
+        // #86 (2026-08-03): republish to the PODLOAN seam BEFORE the setup-complete guard —
+        // a watch takeover is by definition a pod that is already set up, and the watch needs
+        // to know the session is live regardless of what post-connect processing follows.
+        PodLoanConnectClock.podLoanOnSessionEstablished?()
 
         guard podComms.podState?.isSetupComplete == true else {
             self.log.debug("### Skipping post-connect processing with incomplete setup")
