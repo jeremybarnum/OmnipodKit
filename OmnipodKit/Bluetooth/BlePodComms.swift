@@ -30,7 +30,9 @@ class BlePodComms: PodComms {
 
     private var needsSessionEstablishment: Bool = false
 
-    private var bluetoothManager: BluetoothManager!
+    /// Internal, not private: OmniPumpManager+PodLoan reads `loanBleDiagnostics` off it for the
+    /// loan's settle diagnostics, which reported nothing at all before.
+    private(set) var bluetoothManager: BluetoothManager!
 
     /// Whether a host has asked the pump to provide the BLE heartbeat (see
     /// OmniPumpManager.bleHeartbeatUnsupportedForThisPod).
@@ -47,6 +49,118 @@ class BlePodComms: PodComms {
         }
         if let podState = podState, let bleIdentifier = podState.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
+        }
+    }
+
+    // PODLOAN: adopt a pod paired by ANOTHER device (a loan takeover) by scanning for
+    // its advertised address, since the granted pod state's bleIdentifier is a foreign
+    // per-device CoreBluetooth UUID that this device can't retrieve.
+    // Only for a pod this device has never adopted: with a handle of our own in podState the
+    // driver's normal path applies (connectToDevice at init, recovery at poweredOn, the first
+    // read's connect-on-demand dial) and nothing is armed here — the caller decides.
+    func beginLoanTakeover(podId: UInt32) {
+        bluetoothManager.beginLoanTakeover(podId: podId)
+    }
+
+    /// The most recent EAP SQN resynchronization — the pod's session counter found ahead of
+    /// ours, i.e. evidence another controller established sessions since our last contact.
+    /// Written under podStateLock in establishSession; nil until the first resync this
+    /// process. The seize / wake-resume ladders read this through the pump manager's
+    /// podLoanLastSqnResync (seize prerequisite 2).
+    private(set) var lastSqnResync: (at: Date, ours: Int, pods: Int)?
+
+    // PODLOAN: the lender's reclaim escalation — address scan-adopt (hand-back settle, grant-lost,
+    // escape hatch; measured at 224s on the bare pending-connect). Compiles on both platforms;
+    // the watch never calls it.
+    func escalateLoanReclaim(podId: UInt32) {
+        bluetoothManager.escalateLoanReclaim(podId: podId)
+    }
+
+    // PODLOAN: the takeover scan found and adopted the pod; record THIS device's
+    // peripheral UUID as the pod's bleIdentifier so the connect/session path (which
+    // gates on peripheral.identifier == podState.bleIdentifier) recognizes it.
+    func omnipodDidAdoptLoanPod(uuidString: String) {
+        log.default("PODLOAN: adopted pod bleIdentifier %{public}@", uuidString)
+        // REMEMBER IT (2026-08-20). Discovery is NAME RESOLUTION, not authentication: it
+        // translates a pod id we already know into a CoreBluetooth handle this device can
+        // use. The handle is per-device, so the phone's copy in the grant is useless here —
+        // but OUR copy is reusable for every later loan with this same pod, and the driver
+        // already knows how to use it (BlePodComms.init -> connectToDevice, and
+        // bleRunSession adopting a PeripheralManager while disconnected).
+        //
+        // Without this the watch relearns the same handle every loan and throws it away,
+        // because the pump manager is rebuilt from the phone's snapshot at each grant.
+        if let address = podState?.address {
+            PodLoanBleIdentifierCache.store(uuidString, forPodAddress: address)
+        }
+        // Safe to lock here: adoption happens strictly pre-connect (didDiscover gates on
+        // .disconnected), and every other podState mutator runs inside a session, which
+        // requires a connected pod — so no holder can be waiting on this queue.
+        podStateLock.lock()
+        let stale = podState?.bleIdentifier
+        podState?.bleIdentifier = uuidString
+        podStateLock.unlock()
+        // The foreign (phone-local) identifier must not linger in autoConnectIDs: it can
+        // never be discovered on this device, so it would pin hasDiscoveredAllAutoConnect-
+        // Devices false and keep the radio scanning for the entire loan.
+        if let stale = stale, stale != uuidString {
+            bluetoothManager.disconnectFromDevice(uuidString: stale)
+        }
+    }
+
+    // PODLOAN: deliberately stop bidding for the pod's single BLE connection so a
+    // second controller (the watch) holds it uncontested. Pod state, pairing and
+    // keys untouched. Reverse: rearmConnection().
+    func releaseConnection() {
+        // Proof-of-fire: a release that finds no bleIdentifier is a SILENT no-op. That is
+        // tolerable for E4 (the next cycle retries) but not for hand-back teardown, where it
+        // strands the pod CONNECTED to a central that is about to be dropped — the phone then
+        // waits on a link nobody is holding. Log which way it went.
+        if let bleIdentifier = podState?.bleIdentifier {
+            log.default("PODLOAN: releaseConnection -> disconnect %{public}@", bleIdentifier)
+            bluetoothManager.releaseConnectionForLoan(uuidString: bleIdentifier)
+        } else {
+            log.error("PODLOAN: releaseConnection found NO bleIdentifier — BLE link NOT dropped")
+        }
+        // PODLOAN E4 (157): a reclaim escalation may have armed the takeover-grade scan;
+        // releasing the pod ends the bid entirely, so the scan must not outlive it and
+        // contend with the G7 window. No-op when nothing is armed. Ungated with the
+        // escalation itself — an armed phone scan must be cancellable the same way.
+        bluetoothManager.cancelLoanScan()
+    }
+
+    // PODLOAN: the delivery status last received is no longer known to describe the pod.
+    // Safe to lock here: called only while the connection is released, when no session can run.
+    func forgetLastDeliveryStatus() {
+        podStateLock.lock()
+        podState?.lastDeliveryStatusReceived = nil
+        podStateLock.unlock()
+    }
+
+    // PODLOAN: resume bidding after a loan ends. connectToDevice materializes the
+    // peripheral via retrievePeripherals and connects; the session re-establishes
+    // on next contact (pod-side EAP resynchronization).
+    func rearmConnection() {
+        if let bleIdentifier = podState?.bleIdentifier {
+            bluetoothManager.connectToDevice(uuidString: bleIdentifier)
+            // DIAL, don't just re-arm (2026-08-23). Under connect-on-demand this method issued
+            // no connect at all: connectToDevice only dials an UNKNOWN peripheral (ours is
+            // always known by reclaim time), updateConnections→autoReconnect returns
+            // immediately when connectOnDemandEnabled, and the settle's verification read is
+            // gated on isConnectionReady — so nothing dialed, and the 20 s escalation's
+            // scan-adopt was what actually connected. Every measured settle on this build:
+            // 24-28 s, pod advertising at -50 dBm the whole wait, census showing
+            // scanning=false / zero connect intents until escalation. The command path's
+            // fresh-discovery connect is the measured dial (~2-6 s cold), so issue it here
+            // and the settle finds the link up on an early tick instead. Harmless on a watch:
+            // it has no released bid to re-arm, so this seam is never reached there.
+            if BluetoothManager.connectOnDemandEnabled,
+               let pm = bluetoothManager.peripheralManager(forIdentifier: bleIdentifier) {
+                // skipDiscovery: the watch released this pod seconds ago, so it is advertising
+                // NOW — the 4 s listen-first window would be pure delay (measured: link-up
+                // +6.6/+8.8 s with the scan vs ~2.2 s for a bare cold connect).
+                bluetoothManager.connectOnDemand(pm.peripheral, skipDiscovery: true)
+            }
         }
     }
 
@@ -292,9 +406,29 @@ class BlePodComms: PodComms {
         case .SessionNegotiationResynchronization(let keys):
             log.bleDebug("@@@ Received EAP SQN resynchronization: %@", keys.synchronizedEapSqn.data.hexadecimalString)
             if podState != nil {
-                let eapSeq = keys.synchronizedEapSqn.toInt()
-                log.bleDebug("@@@ Updating EAP SQN to: %d", eapSeq)
-                podState!.bleMessageTransportState.eapSeq = eapSeq
+                let podSqn = keys.synchronizedEapSqn.toInt()
+                log.bleDebug("@@@ Updating EAP SQN to: %d", podSqn)
+                // THE TRUST SIGNAL (seize prerequisite 2, 2026-08-30). An SQN resync means the
+                // pod's session counter is ahead of ours: every session establishment
+                // increments it, so the delta counts sessions made by a controller that was
+                // not us since our last contact. During an ordinary loan that controller is
+                // the WATCH (expected — the phone resyncs at every reclaim); for the seize /
+                // wake-resume ladders this same line is the fingerprint that answers "did
+                // someone else run this pod while I was dark". Surfaced here because the
+                // transport used to swallow it in bleDebug, invisible in field logs; the
+                // ladder-facing accessor is podLoanLastSqnResync. Greppable: [sqn-resync].
+                let delta = podSqn - eapSeq
+                lastSqnResync = (at: Date(), ours: eapSeq, pods: podSqn)
+                PodLoanConnectClock.podLoanLog(String(format:
+                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): another controller has talked to this pod since our last contact [sqn-resync]",
+                    podSqn, eapSeq, delta))
+                podState!.bleMessageTransportState.eapSeq = podSqn
+                // PODLOAN: another controller has talked to this pod since our last contact — a
+                // seize this device never released for. Same rule as reclaimConnection(): read
+                // before writing. ANY resync counts: the delta reads 0 after a single foreign
+                // session (bench 2026-09-20: 13 of 13 resyncs followed a phone session, all Δ+0),
+                // and the one temp set that day with no cancel before it sat behind such a resync.
+                podState!.lastDeliveryStatusReceived = nil
             }
             return nil
         case .SessionKeys(let keys):
@@ -660,8 +794,31 @@ class BlePodComms: PodComms {
         // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
         // so configureAndRun can bootstrap the first on-demand connect. Without this, every command
         // failed with podNotConnected and the connect could never start.
+        // STALE MANAGER, not just orphaned manager (bench 2026-08-21 12:42). The orphan/adopt
+        // cycle REPLACES the device entry — addPeripheral logs "removed discarded pod from
+        // devices" — so didConnect is delivered to the NEW PeripheralManager while a session
+        // holding the OLD one waits on a .connect condition that can never fire and burns its
+        // full 20 s timeout. Measured: the pod was connected and configured 4 s in, while the
+        // ladder's read starved against the stale object for the whole window; that one wait is
+        // most of the ~30 s reclaim latency. The central==nil check above cannot see this case —
+        // the stale manager's central is alive and well; it is just no longer the registered one.
+        if let held = manager, let bleId = podState?.bleIdentifier,
+           let registered = bluetoothManager.peripheralManager(forIdentifier: bleId),
+           registered !== held {
+            log.default("[connectOnDemand] held PeripheralManager superseded by a re-adopt — switching to the registered one")
+            omnipodLogDeviceEvent("[connectOnDemand] ** STALE PeripheralManager ** (superseded by re-adopt) — switching before the session runs")
+            manager = registered
+        }
         if manager == nil, BluetoothManager.connectOnDemandEnabled, let bleId = podState?.bleIdentifier {
             self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
+#if os(watchOS)
+            if self.manager == nil {
+                // init's connectToDevice ran before the central was poweredOn, so the device entry
+                // may not exist yet on the first read — re-issue the retrieve now (no-op if it does).
+                bluetoothManager.connectToDevice(uuidString: bleId)
+                self.manager = bluetoothManager.peripheralManager(forIdentifier: bleId)
+            }
+#endif
             if self.manager != nil {
                 log.default("[connectOnDemand] adopted PeripheralManager for %{public}@ while disconnected", bleId)
             }
@@ -803,6 +960,13 @@ extension BlePodComms: PeripheralManagerDelegate {
                 needsSessionEstablishment = false
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
+                // #86 (2026-08-03): this catch is why the handshake failure has been invisible
+                // for three days — it swallows the error and returns normally, so callers cannot
+                // tell a failed session from a successful one. Identical in the pre-stock build,
+                // so this is inherited upstream behaviour rather than a port regression. Surface
+                // it: sendHello / enableNotifications / establishNewSession each fail differently
+                // and only one of them is a crypto/counter problem.
+                PodLoanConnectClock.podLoanLog("[CONFIG] session handshake FAILED: \(error)")
                 log.error("Pod session sync error: %{public}@", String(describing: error))
             }
 

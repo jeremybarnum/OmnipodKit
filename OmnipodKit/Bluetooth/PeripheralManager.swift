@@ -228,6 +228,22 @@ extension PeripheralManager {
 
 // MARK: - Synchronous Commands
 extension PeripheralManager {
+    /// The exact state `runCommand`'s entry guard tests, as one string for the DEVICE log.
+    ///
+    /// FIELD 2026-08-20 L11 (15:42): fourteen reads, 28 s, every one throwing `notReady` — and no
+    /// `[intent] connect via ...` line anywhere, because that guard runs BEFORE the command block, so
+    /// the connect was never issued. The ladder spun for its whole budget without trying. `notReady`
+    /// alone cannot say WHY: for the connect-on-demand path (allowDisconnected: true) the guard
+    /// reduces to `central?.state == .poweredOn`, which fails when the central is nil OR not powered
+    /// on — different bugs with one name. runCommand already logs this via os_log `log.info`, which
+    /// never reaches g7watch.log, so on the wrist it may as well not exist.
+    var readinessDescription: String {
+        "central=" + (central.map { String(describing: $0.state) } ?? "nil")
+            + " peripheral=\(String(describing: peripheral.state))"
+            + " queueDepth=\(sessionQueue.operationCount)"
+            + " conds=\(commandConditions.count)"
+    }
+
     /// - Throws: PeripheralManagerError
     func runCommand(timeout: TimeInterval, allowDisconnected: Bool = false, command: () -> Void) throws {
         // Prelude
@@ -357,7 +373,11 @@ extension PeripheralManager {
         } catch {
             // Unstick a connect that never completed, so didDisconnect/didFailToConnect fires
             // instead of leaving it wedged in .connecting. Queue-correct cancel via BluetoothManager.
-            bluetoothManager?.disconnectOnDemand(peripheral)
+            // The site + error ride along: during an armed loan reclaim this cancel is refused there
+            // (the pending connect IS the recovery — see disconnectOnDemand), and the error text is
+            // what tells the next log whether the fast throw was notReady or a command collision.
+            bluetoothManager?.disconnectOnDemand(peripheral, by: "connectError",
+                                                detail: "\(error) · \(readinessDescription)")
             throw error
         }
         log.default("[connectOnDemand] connected in %{public}@s", String(format: "%.3f", Date().timeIntervalSince(start)))
@@ -694,7 +714,7 @@ extension PeripheralManager {
             self.log.default("[connectOnDemand] idle ~%{public}ds, no queued session -> disconnecting", Int(idleDelay))
             // Queue-correct cancel: route through BluetoothManager so it runs on managerQueue. Cancelling
             // from this (PeripheralManager) queue raced CoreBluetooth's teardown and wedged the next connect.
-            self.bluetoothManager?.disconnectOnDemand(self.peripheral)
+            self.bluetoothManager?.disconnectOnDemand(self.peripheral, by: "idle")
         }
     }
 }
