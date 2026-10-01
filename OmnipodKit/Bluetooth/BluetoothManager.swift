@@ -1928,7 +1928,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         // The connect clock's only feed: without these calls every `cb:` field reads
         // "didConnect never (n=0)" whatever the radio did.
-        PodLoanConnectClock.noteConnect()
+        ConnectClock.noteConnect(appState: isAppForeground ? "fg" : "bg")
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         // We are connected — any outstanding fresh-discovery cold-connect fallback is now moot. Clearing
@@ -2045,7 +2045,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     private func handleDisconnect(_ central: CBCentralManager, peripheral: CBPeripheral, error: Error?, isReconnecting: Bool) {
-        PodLoanConnectClock.noteDisconnect(error: error)   // see the wiring note in didConnect
+        ConnectClock.noteDisconnect(error: error, appState: isAppForeground ? "fg" : "bg")   // see the wiring note in didConnect
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         log.default("[#%{public}@] DISCONNECTED: %{public}@ error=%{public}@ willReconnect=%{public}@ systemReconnecting=%{public}@", instanceID, peripheral,
@@ -2148,7 +2148,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         log.error("[#%{public}@] FAILED TO CONNECT: %{public}@ error=%{public}@", instanceID, peripheral, String(describing: error))
 
-        PodLoanConnectClock.noteFailToConnect(error: error)
+        ConnectClock.noteFailToConnect(error: error, appState: isAppForeground ? "fg" : "bg")
         lastConnectFailure = (id: peripheral.identifier.uuidString,
                               code: (error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "no-error",
                               at: Date())
@@ -2193,34 +2193,19 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 }
 
-// MARK: - Pod-loan BLE handle cache
+// MARK: - Per-pod peripheral handles
 
-/// Remembers THIS device's CoreBluetooth handle for a pod, keyed by the pod's advertised
-/// address.
-///
-/// Why this exists. A loan hands the watch the pod's IDENTITY — controller id, pod id, LTK —
-/// and that is all copyable. What it cannot hand over is ADDRESSABILITY: `CBPeripheral`
-/// identifiers are minted per-device, so the `bleIdentifier` inside the granted `PodState` is
-/// the PHONE's name for the pod and cannot be retrieved on the watch. That is the entire
-/// reason the takeover scan exists — it resolves a known pod id into a local handle.
-///
-/// That resolution only has to happen ONCE per (device, pod). The watch already learns the
-/// right handle on adopt; it just discards it, because the pump manager is rebuilt from the
-/// phone's snapshot at every grant. Persisting it here lets a later loan skip discovery
-/// entirely and use the driver's ordinary connect-on-demand path.
-///
-/// Correctness note: a cached handle can go stale (pod replaced, app reinstalled, the OS
-/// remapping identifiers). An unrecognised handle fails `retrievePeripherals` at once and the
-/// takeover scans; a recognised-but-unreachable one fails the read inside the driver's own
-/// connect timeout and the controller forgets it (`PodLoanWatchController`).
-public enum PodLoanBleIdentifierCache {
+/// This device's CoreBluetooth handle for a pod, keyed by the pod's address. Handles are minted per
+/// device, so an export never carries one; an adopter that has met the pod before reuses its own
+/// and skips the search. A handle proven wrong is forgotten, so the next adopt searches once.
+enum PeripheralHandleCache {
+    /// Unchanged from when this cache was public, so handles learned before survive.
     private static let defaultsKey = "OmnipodKit.podLoanBleIdentifiers"
-    private static let log = OSLog(subsystem: "com.loopkit.OmnipodKit", category: "PodLoanBleIdentifierCache")
+    private static let log = OSLog(subsystem: "com.loopkit.OmnipodKit", category: "PeripheralHandleCache")
 
-    /// Pod addresses are 32-bit; hex-string keys keep the plist legible in a sysdiagnose.
     private static func key(_ podAddress: UInt32) -> String { String(format: "%08X", podAddress) }
 
-    public static func store(_ uuidString: String, forPodAddress podAddress: UInt32) {
+    static func store(_ uuidString: String, forPodAddress podAddress: UInt32) {
         var map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
         guard map[key(podAddress)] != uuidString else { return }
         map[key(podAddress)] = uuidString
@@ -2228,20 +2213,18 @@ public enum PodLoanBleIdentifierCache {
         os_log("stored handle %{public}@ for pod %{public}@", log: log, type: .default, uuidString, key(podAddress))
     }
 
-    public static func identifier(forPodAddress podAddress: UInt32) -> String? {
+    static func identifier(forPodAddress podAddress: UInt32) -> String? {
         let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
         return map[key(podAddress)]
     }
 
-    /// Drop one pod's handle — call when a cached handle has been proven wrong, so the next
-    /// loan pays for discovery once instead of hanging on it forever.
-    public static func forget(podAddress: UInt32) {
+    static func forget(podAddress: UInt32) {
         var map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
         guard map.removeValue(forKey: key(podAddress)) != nil else { return }
         UserDefaults.standard.set(map, forKey: defaultsKey)
         os_log("forgot handle for pod %{public}@", log: log, type: .default, key(podAddress))
     }
 
-    /// Test seam. Not for production use.
-    public static func removeAll() { UserDefaults.standard.removeObject(forKey: defaultsKey) }
+    /// Test seam.
+    static func removeAll() { UserDefaults.standard.removeObject(forKey: defaultsKey) }
 }
