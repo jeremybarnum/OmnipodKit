@@ -2630,11 +2630,8 @@ extension OmniPumpManager: PumpManager {
 
     public func ensureCurrentPumpData(completion: ((Date?) -> Void)?) {
         #if targetEnvironment(simulator)
-        // SIM HAND-OFF HARNESS: a real status fetch needs the radio, so in the simulator every
-        // "pump data too old" fetch failed forever — the phone's own loop errored every cycle
-        // (pumpDataTooOld) and the loan reclaim verification (which requires lastSync to ADVANCE
-        // past the reclaim start) could never succeed. Fake the successful round-trip the same
-        // way the takeover seam does: stamp a fresh odometer measurement and report now.
+        // No radio in the simulator, so a status fetch would always fail: stamp a fresh measurement
+        // and report now, as refreshDeliveredUnits does.
         if state.podState != nil {
             setState { state in
                 var pod = state.podState
@@ -2867,8 +2864,7 @@ extension OmniPumpManager: PumpManager {
         }
 
         #if targetEnvironment(simulator)
-        // SIM HAND-OFF HARNESS: no radio. Cancelling with no temp running changes nothing on the pod,
-        // and a grant cancels before it releases.
+        // No radio in the simulator; cancelling with no temp running changes nothing on the pod.
         if duration < .ulpOfOne, podState.unfinalizedTempBasal == nil {
             completion(nil)
             return

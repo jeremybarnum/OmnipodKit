@@ -110,22 +110,10 @@ class BlePodComms: PodComms {
     func rearmConnection() {
         if let bleIdentifier = podState?.bleIdentifier {
             bluetoothManager.connectToDevice(uuidString: bleIdentifier)
-            // DIAL, don't just re-arm. Under connect-on-demand this method issued
-            // no connect at all: connectToDevice only dials an UNKNOWN peripheral (ours is
-            // always known by reclaim time), updateConnections→autoReconnect returns
-            // immediately when connectOnDemandEnabled, and the settle's verification read is
-            // gated on isConnectionReady — so nothing dialed, and the 20 s escalation's
-            // scan-adopt was what actually connected. Every measured settle before this:
-            // 24-28 s, pod advertising at -50 dBm the whole wait, census showing
-            // scanning=false / zero connect intents until escalation. The command path's
-            // fresh-discovery connect is the measured dial (~2-6 s cold), so issue it here
-            // and the settle finds the link up on an early tick instead. Harmless on a watch:
-            // it has no released bid to re-arm, so this seam is never reached there.
+            // Under connect-on-demand, connectToDevice does not dial a known peripheral, so dial here.
             if BluetoothManager.connectOnDemandEnabled,
                let pm = bluetoothManager.peripheralManager(forIdentifier: bleIdentifier) {
-                // skipDiscovery: the watch released this pod seconds ago, so it is advertising
-                // NOW — the 4 s listen-first window would be pure delay (measured: link-up
-                // +6.6/+8.8 s with the scan vs ~2.2 s for a bare cold connect).
+                // The other controller has just released the pod, so it is advertising: skip the 4 s scan.
                 bluetoothManager.connectOnDemand(pm.peripheral, skipDiscovery: true)
             }
         }
@@ -752,14 +740,8 @@ class BlePodComms: PodComms {
         // yet. Adopt the pod's PeripheralManager from the device list (it exists while disconnected)
         // so configureAndRun can bootstrap the first on-demand connect. Without this, every command
         // failed with podNotConnected and the connect could never start.
-        // STALE MANAGER, not just orphaned manager (bench 2026-08-21 12:42). The orphan/adopt
-        // cycle REPLACES the device entry — addPeripheral logs "removed discarded pod from
-        // devices" — so didConnect is delivered to the NEW PeripheralManager while a session
-        // holding the OLD one waits on a .connect condition that can never fire and burns its
-        // full 20 s timeout. Measured: the pod was connected and configured 4 s in, while the
-        // ladder's read starved against the stale object for the whole window; that one wait is
-        // most of the ~30 s reclaim latency. The central==nil check above cannot see this case —
-        // the stale manager's central is alive and well; it is just no longer the registered one.
+        // A re-adopt replaces the device entry and didConnect goes to the new PeripheralManager, so a
+        // session on the old one would wait out its full connect timeout. Use the registered one.
         if let held = manager, let bleId = podState?.bleIdentifier,
            let registered = bluetoothManager.peripheralManager(forIdentifier: bleId),
            registered !== held {

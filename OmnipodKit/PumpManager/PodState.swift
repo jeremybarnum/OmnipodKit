@@ -135,9 +135,8 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
 
     var lastDeliveryStatusReceived: DeliveryStatus? // this variable is not persistent across app restarts
 
-    /// Another controller may be delivering what this one sees but does not track, so it books none
-    /// of it. Set on adopting or taking back control, and on evidence of a foreign session; cleared
-    /// once the pod shows no bolus running.
+    /// Untracked delivery may be another controller's, so none is booked. Set on adopt, take-back or
+    /// a foreign session; cleared once the pod shows no bolus running.
     var untrackedDeliveryIsForeign: Bool = false
 
 
@@ -682,30 +681,15 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
                 self.bleMessageTransportState = BleMessageTransportState()
             }
 
-            // BLE pod type specific values.
-            //
-            // DECODED INDEPENDENTLY, DELIBERATELY. These were one `if let`, which
-            // coupled the pod's ENCRYPTION KEY to a CoreBluetooth handle — and the handle is the
-            // one field a caller is likely to consider disposable, because it is per-device and
-            // therefore meaningless on any machine but the one that minted it ("the phone's
-            // bleIdentifier is useless here"), which is the reasoning that leads someone to strip
-            // it from a serialized podState.
-            //
-            // Doing so silently dropped the LTK: takeovers then connected to the pod normally and
-            // were hung up on ~108 ms after the first command (Code=7), three grants in a row —
-            // a failure that looks like a radio problem and is nothing of the sort (field
-            // 2026-08-21).
-            //
-            // A missing handle is recoverable (rediscover the pod). A missing key is not
-            // recoverable and is not visible. They must not share a condition.
+            // BLE pod type specific values
+            // Decoded independently: an export drops the per-device handle, and must keep the key.
             if let ltkString = rawValue["ltk"] as? String {
                 self.ltk = Data(hexadecimalString: ltkString)
             }
             if let bleIdentifier = rawValue["bleIdentifier"] as? String {
                 self.bleIdentifier = bleIdentifier
             }
-            // Loud, because the silence is the whole problem: a pod with a handle and no key will
-            // connect and then fail every command, and nothing downstream says why.
+            // A pod with no key connects and then fails every command, with nothing else saying why.
             if self.ltk == nil, rawValue["ltk"] != nil {
                 os_log("PodState decode: ltk present in rawValue but did not decode — every pod command will fail", log: log, type: .error)
             }

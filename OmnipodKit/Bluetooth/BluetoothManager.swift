@@ -103,9 +103,8 @@ protocol OmniConnectionDelegate: AnyObject {
     /// normal getPodStatus -> alertsChanged -> issueAlert path. `slots` is the decoded firing AlertSet.
     func omnipodDidDetectAlert(slots: AlertSet)
 
-    /// PODLOAN: a loan takeover scan adopted the pod as `uuidString` (this device's own
-    /// peripheral UUID). The delegate must record it as the pod's bleIdentifier so the
-    /// connection/session path recognizes the peripheral.
+    /// A takeover scan adopted the pod as `uuidString`, this device's own peripheral UUID. The
+    /// delegate records it as the pod's bleIdentifier.
     func omnipodDidAdoptLoanPod(uuidString: String)
 }
 
@@ -113,7 +112,7 @@ extension OmniConnectionDelegate {
     func omnipodLogDeviceEvent(_ message: String) {}
     func omnipodHeartbeatDidFire() {}
     func omnipodDidDetectAlert(slots: AlertSet) {}
-    func omnipodDidAdoptLoanPod(uuidString: String) {}   // PODLOAN: default no-op
+    func omnipodDidAdoptLoanPod(uuidString: String) {}
 }
 
 
@@ -159,19 +158,8 @@ class BluetoothManager: NSObject {
         }
     }
 
-    /// PODLOAN: when a watch takes over a pod paired by another device (a loan), the
-    /// phone's stored `bleIdentifier` is a per-device CoreBluetooth UUID that means
-    /// nothing here — retrievePeripherals returns nothing. Instead we scan and adopt the
-    /// pod by its advertised address (global). Set to the pod's address to arm takeover;
-    /// cleared once adopted.
-    /// The takeover/reclaim scan marker.
-    ///
-    /// INSTRUMENTED because it went nil underneath a live reclaim ladder and nobody
-    /// could say who cleared it. connectOnDemand consults it (:881) to decide whether to leave a
-    /// running scan alone or stop and replace it with its own 4-second one, so a silent clear
-    /// hands the pod's discovery scan to a different owner mid-ladder. Three writers exist —
-    /// `escalateLoanReclaim` on each platform, `cancelLoanScan`, and adoption — and the log had
-    /// no way to tell them apart.
+    /// The address of a pod to find by scanning and adopt (CoreBluetooth handles are per device);
+    /// nil when no takeover scan is armed. Every change is logged with its reason.
     private var loanTakeoverPodId: UInt32? = nil {
         didSet {
             guard oldValue != loanTakeoverPodId else { return }
@@ -191,19 +179,8 @@ class BluetoothManager: NSObject {
     /// The last connect failure, kept so a settle that never verifies can say WHY.
     private var lastConnectFailure: (id: String, code: String, at: Date)?
 
-    /// One line of BLE state for the loan's diagnostics.
-    ///
-    /// The phone's settle printed "ble: no diagnostics from the pump manager" on both of its
-    /// ceiling failures (e124, e127) because `connectionDiagnostics()` has a default returning
-    /// nil and nothing overrode it. So at the exact moment the phone could not reach a pod that
-    /// nothing else was holding, its BLE layer said nothing at all — and any theory about the
-    /// phone half was unfalsifiable.
-    ///
-    /// Reports the things that distinguish the candidates: whether the radio is on, whether we
-    /// are scanning, how many peripherals we are holding, what the pod's own peripheral thinks,
-    /// and the last connect refusal. `CBErrorDomain#11` here means the system connection table is
-    /// full, which is a host state and not a pod fault — and it is the one a Bluetooth toggle
-    /// clears.
+    /// One line of BLE state for hand-off diagnostics. A `CBErrorDomain#11` failure means the system
+    /// connection table is full, a host state (cleared by a Bluetooth toggle), not a pod fault.
     var loanBleDiagnostics: String {
         let radio: String
         switch manager.state {
@@ -226,42 +203,30 @@ class BluetoothManager: NSObject {
     /// The uuidPdmId is set after pairing...
     private var uuidPdmId: UInt32? = nil
 
-    /// PODLOAN: drop the pod link on purpose so another controller can take it. Clears the
-    /// command-connect marker first, exactly as the deliberate idle disconnect does, so
-    /// didDisconnect reads the cancel as intended and the foreground keep-alive does not
-    /// reconnect into the borrower's loan (measured 2026-09-16 09:17 with Loop open on the phone:
-    /// the phone re-linked within 3 s of releasing and held the pod for the whole loan).
+    /// Drop the pod link so another controller can take it. Clears the command-connect marker first,
+    /// as the idle disconnect does, so the foreground keep-alive does not reconnect.
     func releaseConnectionForLoan(uuidString: String) {
         managerQueue.async { self.commandConnectInFlight = false }
         disconnectFromDevice(uuidString: uuidString)
     }
 
-    /// PODLOAN: arm loan-takeover — scan for the pod with this address and adopt the
-    /// peripheral this device discovers (its own CoreBluetooth UUID), rather than the
-    /// foreign identifier from the granted pod state.
+    /// Scan for the pod with this address and adopt the peripheral this device discovers.
     func beginLoanTakeover(podId: UInt32) {
         managerQueue.async {
             self.loanScanMarkerReason = "beginLoanTakeover"
             self.loanTakeoverPodId = podId
             if self.manager.state == .poweredOn {
-                self.log.default("PODLOAN: begin takeover scan for pod 0x%x", podId)
-                // RE-ARM, don't skip. A scan is almost always already running by now — the idle
-                // fault-watch, armed microseconds earlier when the manager came up, filtering on
-                // C00A/…02. `if !isScanning` therefore skipped this call every time and left the
-                // takeover listening for a FAULT advertisement a healthy pod never sends, which is
-                // the whole reason a takeover could never find its pod. The filter has to be
-                // replaced, so stop the old scan first: scanForPeripherals does not merge filters,
-                // and a running scan is not restarted by calling it again.
+                self.log.default("begin takeover scan for pod 0x%x", podId)
+                // The running idle scan filters on the fault UUID, which a healthy pod never
+                // advertises; scanForPeripherals does not merge filters, so stop it and re-arm.
                 if self.manager.isScanning {
-                    self.log.default("PODLOAN: stopping the idle scan to re-arm with the takeover filter")
+                    self.log.default("stopping the idle scan to re-arm with the takeover filter")
                     self.manager.stopScan()
                 }
                 self.startScanning()
             } else {
-                // The common case: takeover arms milliseconds after the central is
-                // created, before it reaches poweredOn. centralManagerDidUpdateState
-                // starts the scan (its condition consults loanTakeoverPodId).
-                self.log.default("PODLOAN: takeover armed for pod 0x%x; scan starts at poweredOn", podId)
+                // centralManagerDidUpdateState starts the scan at poweredOn.
+                self.log.default("takeover armed for pod 0x%x; scan starts at poweredOn", podId)
             }
         }
     }
@@ -813,16 +778,11 @@ class BluetoothManager: NSObject {
         log.default("BluetoothManager #%{public}@ DEINIT", instanceID)
     }
 
-    /// PODLOAN: the lender's reclaim escalation. The phone reclaims at every hand-back settle,
-    /// whenever a grant is lost, and on the escape-hatch force-reclaim; a bare pending-connect
-    /// proved probabilistic against an idle pod (measured hand-back settles of 224.2s and 237.0s
-    /// against ~1s when the link happened to still be up). Arms the scan-adopt, which is what
-    /// actually finds an idle pod, and deliberately does NOT rebuild the central: it owns a restore
-    /// identifier, and rebuilding it would discard the restoration the app depends on after a
-    /// background relaunch. Compiles on both platforms; only the lender calls it.
+    /// Arm a scan-adopt for a pod a pending connect has not reached; either controller may call it.
+    /// The central is kept, not rebuilt: it owns the restore identifier a background relaunch needs.
     func escalateLoanReclaim(podId: UInt32) {
         managerQueue.async {
-            self.log.default("PODLOAN: reclaim escalation (iOS) — arming scan-adopt for pod 0x%x (central preserved)", podId)
+            self.log.default("take escalation — arming scan-adopt for pod 0x%x (central preserved)", podId)
             self.loanScanMarkerReason = "escalate"
             self.loanTakeoverPodId = podId
             if self.manager.state == .poweredOn, !self.manager.isScanning {
@@ -831,13 +791,12 @@ class BluetoothManager: NSObject {
         }
     }
 
-    /// PODLOAN E4 (157): disarm an escalation scan that never found the pod. Called on
-    /// release so the scan cannot outlive the reclaim ladder and contend with the G7
-    /// window. No-op when nothing is armed (an adopt already cleared it).
+    /// Disarm a takeover scan that never found the pod, so it does not outlive a release.
+    /// No-op when nothing is armed (an adopt already cleared it).
     func cancelLoanScan() {
         managerQueue.async {
             guard self.loanTakeoverPodId != nil else { return }
-            self.log.default("PODLOAN: cancelling unfinished reclaim-escalation scan")
+            self.log.default("cancelling unfinished takeover scan")
             self.loanScanMarkerReason = "cancelLoanScan"
             self.loanTakeoverPodId = nil
             if self.manager.state == .poweredOn, self.manager.isScanning, !self.discoveryModeEnabled {
@@ -1050,30 +1009,12 @@ class BluetoothManager: NSObject {
     func connectViaFreshDiscovery(_ peripheral: CBPeripheral) {
         managerQueue.async {
             let id = peripheral.identifier.uuidString
-            // PODLOAN: during a TAKEOVER, leave a running scan alone.
-            //
-            // This method exists for the steady state, where the pod is known and a 4s listen
-            // before a cold connect is a good trade. In a takeover it is actively harmful: the
-            // takeover read loop calls a connect every 8s, so this tears the scan down and rebuilds
-            // it every ~4.4s — measured — which (a) discards the takeover's allowDuplicates scan
-            // armed in startScanning, and (b) is aggressive enough that iOS throttles the scanning.
-            // The pod is then found only when a 4s window happens to coincide with an advertisement:
-            // two measured takeovers took 190.9s and 195.2s, both succeeding, both after 8 reads.
-            //
-            // A takeover already has its own budget (14 reads / ~112s) and its own correctly-filtered
-            // continuous scan. Let that scan run; a discovery will drive the connect through
-            // didDiscover exactly as it does in the steady state.
-            // NOT gated on isScanning — that was the bug in the first version of this guard. The
-            // 4s fallback below calls stopScan() before its cold connect, so by the NEXT call
-            // isScanning is false, the guard missed, and the teardown loop resumed: measured at
-            // 265.2s / 11 reads with a scan rebuilt every ~4.3s throughout. The condition only
-            // held on the first call, which is exactly when it did not matter.
+            // During a takeover, keep its continuous scan rather than tearing it down for a 4 s one
+            // on every connect (repeated teardown gets scanning throttled); didDiscover connects.
             if self.loanTakeoverPodId != nil {
                 self.pendingFreshConnectID = id
                 if !self.manager.isScanning {
-                    // The fallback (or a previous connect) stopped it. Re-arm through
-                    // startScanning so it comes back with the TAKEOVER filter and
-                    // allowDuplicates, rather than this method's narrower one-shot scan.
+                    // Re-arm with the takeover filter if a fallback stopped it.
                     self.startScanning()
                 }
                 self.log.default("[connectOnDemand] takeover in progress — continuous scan, no 4s teardown (%{public}@)", id)
@@ -1270,9 +1211,7 @@ class BluetoothManager: NSObject {
     }
 
     /// Start a command (or keep-alive) connect. Must run on managerQueue.
-    /// `skipDiscovery` goes straight to the flush-and-cold-connect: pass it when the pod is
-    /// KNOWN to be advertising right now (a reclaim of a pod the watch released seconds ago) —
-    /// the 4 s listen-first window is pure loss against a guaranteed-advertising pod.
+    /// `skipDiscovery` goes straight to the cold connect, for a pod known to be advertising now.
     private func beginCommandConnect(_ peripheral: CBPeripheral, skipDiscovery: Bool = false) {
         dispatchPrecondition(condition: .onQueue(managerQueue))
         if delayedProbeInFlight {
@@ -1415,41 +1354,16 @@ class BluetoothManager: NSObject {
     /// Cancel/disconnect the peripheral on the central's queue. This is the idle-disconnect / teardown
     /// path, so we're going idle: clear commandConnectInFlight so the resulting didDisconnect re-arms
     /// the heartbeat probe.
-    /// `site` names WHY we are hanging up — "idle" (the between-commands idle-disconnect) or
-    /// "connectError" (connectOnDemand's catch, unsticking a connect after its command threw).
-    /// The ledger recorded both as one anonymous "cancelled:disconnectOnDemand", which is how the
-    /// loan-reclaim killer below hid for a week behind a legitimate teardown with the same name.
+    /// `site` names why we are hanging up: "idle" (the idle-disconnect) or "connectError"
+    /// (connectOnDemand's catch, unsticking a connect after its command threw).
     func disconnectOnDemand(_ peripheral: CBPeripheral, by site: String, detail: String? = nil) {
         managerQueue.async { [weak self] in
             guard let self = self else { return }
-            // THE LADDER'S OWN AXE (2026-08-20, loan e147). Every cancelled pod connect in the loan —
-            // 6 of 6 — was this teardown, at 0.36-1.87 s after the connect was issued, against a
-            // demonstrated ~1.3 s connect latency. The mechanism: the reclaim ladder polls every ~2 s;
-            // a poll's connect command can throw FAST (`notReady` / pending-conditions collision —
-            // runCommand's only sub-timeout throws; the 20 s timeout cannot fire at 0.4 s), and the
-            // catch then "cleaned up" by cancelling the in-flight connect — which was the recovery
-            // itself, about to land. L5 succeeded only because didConnect (1.28 s) beat the next
-            // poll's error; L14 got one attempt, cancelled at 0.36 s, and the cycle failed with
-            // enactFailed(communication(nil)).
-            //
-            // So: while the loan takeover/reclaim marker is armed, a connect-error teardown is
-            // FORBIDDEN — the error belongs to the failed poll, not to the connect. The connect stays
-            // pending (it has no timeout and adoption resolves it); if it truly wedges, the marker
-            // teardown at ladder end restores the old behavior for the next attempt, and freshConnect
-            // exists for exactly that unstick. The idle-disconnect site is untouched: it requires
-            // `.connected`, which an open connect intent excludes, so it was provably never the axe.
-            //
-            // Checked on managerQueue, where the marker is authoritative — no cross-queue race.
+            // While a takeover scan is armed, a command error must not cancel the pending connect:
+            // the error belongs to the command, and the connect is the recovery about to land.
             if site == "connectError", self.loanTakeoverPodId != nil {
-                // ONLY CLAIM A RIDING CONNECT IF ONE EXISTS. The first cut printed
-                // "LEFT RIDING" unconditionally — including for L11, where runCommand's entry guard
-                // threw before the command block ran, so no connect() was ever issued and there was
-                // nothing to protect. The guard was correct and the message was a lie: it read as
-                // "we have a bid in, waiting" when the truth was "we never tried, fourteen times".
-                // That is exactly the kind of instrument that costs an afternoon, so it now reports
-                // which of the two actually happened.
                 self.connectionDelegate?.omnipodLogDeviceEvent(
-                    "[connectOnDemand] connect-command error (\(detail ?? "unknown")) during armed loan reclaim — any pending connect is left in place (the connect is the recovery, not the wedge)")
+                    "[connectOnDemand] connect-command error (\(detail ?? "unknown")) during an armed takeover — any pending connect is left in place")
                 return
             }
             self.commandConnectInFlight = false
@@ -1464,29 +1378,15 @@ class BluetoothManager: NSObject {
         let services: [CBUUID]?
         let options: [String: Any]
         if discoveryModeEnabled || loanTakeoverPodId != nil {
-            // Pairing OR PODLOAN takeover: scan for the pod's main advertisement service, so a pod
-            // this device holds no peripheral for is actually found.
-            //
+            // Pairing or takeover: scan for the pod's main advertisement service, so a pod this
+            // device holds no peripheral for is found.
             // MUST take precedence over the low-power alarm scan (which filters on C005/C00A and would
             // never see a pairing pod) and over scanningEnabled (pairing has to scan regardless).
-            //
-            // The TAKEOVER arm was missing, and it is the same situation as pairing: the watch
-            // inherits a pod it has never seen, so it has no CBPeripheral and discovery is mandatory.
-            // Falling through left it on the low-power fault-watch — C00A for DASH, the "…02"
-            // attention UUID for O5 — which by design only fires when a pod is FAULTED. A healthy pod
-            // never advertises it, so the takeover scan could not succeed at any distance or with any
-            // amount of patience: 14 reads, 113 s, `no-peripheral · didConnect never (n=0)`, every
-            // time. The older driver had no low-power mode and always scanned the main
-            // service, which is why this only appeared after adopting the newer OmnipodKit.
             let reason = discoveryModeEnabled ? "discovery/pairing" : "loan-takeover"
             services = [serviceUUID]
             options = [CBCentralManagerScanOptionAllowDuplicatesKey: true]
             log.default("Start scanning (%{public}@ filter=%{public}@)", reason, serviceUUID.uuidString)
-            // WHERE THE FILTER CAME FROM. `podScanServiceUUID` has two branches — an O5
-            // UUID DERIVED from uuidPdmId, and the pod profile's static advertisement service — and a
-            // wrong branch produces a scan that cannot match at any distance, for any duration, with no
-            // symptom other than silence. That is indistinguishable from deafness in the log, and it is
-            // the cheapest of the candidate causes to rule in or out, so name the branch.
+            // Log which branch of `podScanServiceUUID` built the filter: a wrong one matches nothing, silently.
             let filterSource = podType.isO5
                 ? (uuidPdmId != nil ? "O5/pdm-derived" : "O5/profile-fallback")
                 : "profile(\(String(describing: podType)))"
@@ -1634,11 +1534,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
                 // Monitor mode: keep scanning continuously so we observe pod advertisements,
                 // regardless of whether all autoConnect devices are known/connected.
                 if !manager.isScanning { startScanning() }
-            // PODLOAN: an armed takeover is a first-class scan reason. beginLoanTakeover
-            // races this central to poweredOn (it arms milliseconds after init), and the
-            // takeover's autoConnectIDs are empty (the grant rides a released connection),
-            // which makes hasDiscoveredAllAutoConnectDevices vacuously true — the stock
-            // condition alone would never scan.
+            // An armed takeover scans: its autoConnectIDs are empty, so hasDiscoveredAllAutoConnectDevices
+            // is vacuously true and would not.
             } else if (discoveryModeEnabled || loanTakeoverPodId != nil || !hasDiscoveredAllAutoConnectDevices) && !manager.isScanning {
                 startScanning()
             } else if !discoveryModeEnabled && loanTakeoverPodId == nil && manager.isScanning {
@@ -1859,35 +1756,15 @@ extension BluetoothManager: CBCentralManagerDelegate {
         if let podAdvertisement = PodAdvertisement(advertisementData, podType: podType) {
             addPeripheral(peripheral, podAdvertisement: podAdvertisement)
 
-            // PODLOAN: adopt an already-paired pod by its advertised ADDRESS. A pod paired on
-            // another device stores that device's per-device CoreBluetooth UUID, which means
-            // nothing here — the address is the only identifier both devices agree on. Match it,
-            // record THIS device's identifier as the pod's, and connect; the session
-            // re-establishes from the granted keys.
-            // O5 adverts carry the controller id, not the pod address; the scan filter is already
-            // derived from it, so match on that.
+            // Adopt a pod paired elsewhere by its advertised address, the one identifier both devices
+            // share. O5 adverts carry the controller id instead, so match on that.
             let advertMatchesLoanPod = podAdvertisement.podId == loanTakeoverPodId
                 || (podType.isO5 && podAdvertisement.pdmId != nil && podAdvertisement.pdmId == uuidPdmId)
             if let takeoverId = loanTakeoverPodId, advertMatchesLoanPod, peripheral.state == .disconnected {
                 let adopted = peripheral.identifier.uuidString
-                log.default("PODLOAN: adopting pod 0x%x as %{public}@", takeoverId, adopted)
-                // KEEP THE MARKER UNTIL THE CONNECT IS CONFIRMED.
-                //
-                // This used to clear it here, on merely HEARING a matching advertisement. Field
-                // 2026-08-19, one millisecond apart:
-                //
-                //   07:31:43.285  [loan-scan] marker 0x177e6b7e -> nil (adopted)
-                //   07:31:43.294  Pod failed to connect … CBErrorDomain Code=11
-                //                 "The system has reached the maximum number of connections"
-                //
-                // The connect was refused, and the ladder then polled for another twenty seconds
-                // with no scan armed and no marker — so connectOnDemand was free to stop and
-                // replace whatever scan remained, and a retry had nothing to hear the pod with.
-                // An advertisement means the pod is THERE, not that we have it.
-                //
-                // Cleared instead in didConnect (success) and left standing in didFailToConnect,
-                // so a refused connect keeps the scan armed for the next attempt. `cancelLoanScan`
-                // still clears it when the reclaim genuinely ends.
+                log.default("adopting pod 0x%x as %{public}@", takeoverId, adopted)
+                // The marker stays armed until didConnect: a refused connect (e.g. Code=11) must
+                // leave the scan running for the next advertisement.
                 pendingAdoptedLoanPod = adopted
                 autoConnectIDs.insert(adopted)
                 connectionDelegate?.omnipodDidAdoptLoanPod(uuidString: adopted)
@@ -1916,9 +1793,8 @@ extension BluetoothManager: CBCentralManagerDelegate {
             log.info("Ignoring peripheral with unexpected advertisement data: %{public}@", advertisementData)
         }
         
-        // PODLOAN: never stop while a takeover is armed — with empty autoConnectIDs,
-        // hasDiscoveredAllAutoConnectDevices is vacuously true and the first discovery
-        // of ANY peripheral would otherwise kill the takeover scan.
+        // Never stop an armed takeover scan: with empty autoConnectIDs the first discovery of any
+        // peripheral would otherwise end it.
         if !BluetoothManager.advertisementMonitorEnabled && !discoveryModeEnabled && loanTakeoverPodId == nil && central.isScanning && hasDiscoveredAllAutoConnectDevices {
             log.debug("All peripherals discovered")
             stopScanning()
@@ -1926,8 +1802,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        // The connect clock's only feed: without these calls every `cb:` field reads
-        // "didConnect never (n=0)" whatever the radio did.
+        // Feeds ConnectClock, with noteDisconnect and noteFailToConnect.
         ConnectClock.noteConnect(appState: isAppForeground ? "fg" : "bg")
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
@@ -2045,7 +1920,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
     }
 
     private func handleDisconnect(_ central: CBCentralManager, peripheral: CBPeripheral, error: Error?, isReconnecting: Bool) {
-        ConnectClock.noteDisconnect(error: error, appState: isAppForeground ? "fg" : "bg")   // see the wiring note in didConnect
+        ConnectClock.noteDisconnect(error: error, appState: isAppForeground ? "fg" : "bg")
         dispatchPrecondition(condition: .onQueue(managerQueue))
 
         log.default("[#%{public}@] DISCONNECTED: %{public}@ error=%{public}@ willReconnect=%{public}@ systemReconnecting=%{public}@", instanceID, peripheral,
@@ -2155,9 +2030,7 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
         connectionDelegate?.omnipodPeripheralDidFailToConnect(peripheral: peripheral, error: error)
 
-        // A refused adoption keeps the marker, so the scan stays armed for the next advertisement
-        // rather than leaving the ladder blind. Named loudly because Code=11 ("maximum number of
-        // connections") is a SYSTEM state, not a pod fault, and reads as one in a bare log.
+        // A refused adoption keeps the marker, so the scan stays armed for the next advertisement.
         if pendingAdoptedLoanPod == peripheral.identifier.uuidString {
             pendingAdoptedLoanPod = nil
             let code = (error as NSError?).map { "\($0.domain)#\($0.code)" } ?? "no-error"
@@ -2195,11 +2068,10 @@ extension BluetoothManager: CBCentralManagerDelegate {
 
 // MARK: - Per-pod peripheral handles
 
-/// This device's CoreBluetooth handle for a pod, keyed by the pod's address. Handles are minted per
-/// device, so an export never carries one; an adopter that has met the pod before reuses its own
-/// and skips the search. A handle proven wrong is forgotten, so the next adopt searches once.
+/// This device's CoreBluetooth handle for each pod it has met, keyed by pod address, so an adopt
+/// can skip the search. A handle proven wrong is forgotten, so the next adopt searches.
 enum PeripheralHandleCache {
-    /// Unchanged from when this cache was public, so handles learned before survive.
+    /// Kept as is so handles already stored survive.
     private static let defaultsKey = "OmnipodKit.podLoanBleIdentifiers"
     private static let log = OSLog(subsystem: "com.loopkit.OmnipodKit", category: "PeripheralHandleCache")
 

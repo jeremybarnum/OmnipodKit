@@ -57,9 +57,8 @@ extension OmniPumpManagerState {
                                          state: shared.rawValue)
     }
 
-    /// Another controller's shared state as this controller's own. In-flight doses keep the
-    /// exporter's identities and are finalized from the pod's status; delivery this controller
-    /// sees but did not command is not booked.
+    /// Another controller's shared state as this one's: in-flight doses keep the exporter's
+    /// identities, and delivery this controller did not command is not booked.
     func adopted(handle: String?) -> OmniPumpManagerState {
         var state = self
         var pod = podState?.sharedFacts
@@ -82,9 +81,8 @@ extension OmniPumpManagerState {
 
 extension PodState {
 
-    /// The facts another controller may share. Left out: this controller's peripheral handle, the
-    /// session keys and per-session counters, and any pending command. The EAP sequence and
-    /// message number travel; the pod resynchronizes both.
+    /// The pod without this controller's handle, session keys, per-session counters or pending
+    /// command. The EAP sequence and message number travel; the pod resynchronizes both.
     var sharedFacts: PodState {
         var pod = self
         pod.bleIdentifier = nil
@@ -97,9 +95,8 @@ extension PodState {
         return pod
     }
 
-    /// Another controller ran the pod: its last delivery status is forgotten, delivery this
-    /// controller does not track is not booked, and with `dropInFlight` the copies of doses in
-    /// flight at release are dropped. The pod's status resolves them, never the frozen view.
+    /// Another controller ran the pod: forget the last delivery status, book no untracked delivery,
+    /// and with `dropInFlight` drop the in-flight copies so the pod's status resolves them.
     mutating func resolveAfterForeignControl(dropInFlight: Bool) {
         lastDeliveryStatusReceived = nil
         untrackedDeliveryIsForeign = true
@@ -152,7 +149,7 @@ extension OmniPumpManager: ExclusiveDeviceControl {
 
     public var isControlReady: Bool {
         #if targetEnvironment(simulator)
-        // SIM HAND-OFF HARNESS: no radio, so no peripheral ever connects; a pod is "home".
+        // The simulator has no radio, so no peripheral ever connects; any pod counts as ready.
         return state.podState != nil
         #else
         return peripheralStateDescription == "connected"
@@ -225,8 +222,7 @@ extension OmniPumpManager: PumpDeliveryOdometer {
     /// A real status read, bypassing the freshness shortcut in ensureCurrentPumpData.
     public func refreshDeliveredUnits(completion: @escaping (Bool) -> Void) {
         #if targetEnvironment(simulator)
-        // SIM HAND-OFF HARNESS: no radio, so fake the round-trip and stamp the measurement a
-        // take needs, as upstream's jumpStartPod fabricates the radio's answer.
+        // No radio in the simulator: fake the round-trip and stamp a measurement, as jumpStartPod does.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.2) { [weak self] in
             guard let self = self else { return completion(false) }
             self.setState { state in
@@ -238,7 +234,7 @@ extension OmniPumpManager: PumpDeliveryOdometer {
                     state.updatePodStateFromPodComms(pod)
                 }
             }
-            self.log.default("SIM HAND-OFF: refreshDeliveredUnits simulated OK (no radio in the simulator)")
+            self.log.default("refreshDeliveredUnits simulated OK (no radio in the simulator)")
             completion(true)
         }
         #else
@@ -255,9 +251,8 @@ extension OmniPumpManager: PumpDeliveryOdometer {
 
 // MARK: - Connect clock
 
-/// CoreBluetooth's own connect and disconnect edges, stamped as they happen. A host polling the
-/// peripheral state on its own timer cannot tell "connected late" from "looked late" (watchOS
-/// defers a background app's timers by up to a minute); these stamps can. Observation only.
+/// CoreBluetooth's connect and disconnect edges, stamped as they happen, so a host polling on a
+/// deferred timer can tell "connected late" from "looked late". Observation only.
 enum ConnectClock {
     private static let lock = NSLock()
     private static var _lastConnectAt: Date?
@@ -338,10 +333,8 @@ enum ConnectClock {
         lock.unlock()
     }
 
-    /// A take carries the wedge signature when the system refused a connection slot during it,
-    /// or no connect landed at all. Pending CoreBluetooth connects outlive the app that issued
-    /// them, so after a wedge retrying makes the radio blinder; only a Bluetooth toggle clears it.
-    /// For takes only: a quiet pod mid-session also produces zero connects.
+    /// A take is wedged if the system refused a connection slot during it or no connect landed;
+    /// only a Bluetooth toggle clears that. For takes only: a quiet pod mid-session also has zero connects.
     static func isWedge(lastCode11At: Date?, lastConnectAt: Date?, since: Date) -> Bool {
         if let c11 = lastCode11At, c11 >= since { return true }
         let connectedThisAttempt = lastConnectAt.map { $0 >= since } ?? false
