@@ -4,9 +4,11 @@
 //
 //  Handing the pod to another controller: LoopKit's DeviceConfigurationSharing,
 //  ExclusiveDeviceControl and PumpDeliveryOdometer. The kit keeps the contract's rules here:
-//  an export carries no local state, live session or pending command; an adopter owns the
-//  in-flight doses under the exporter's identities; a controller that released drops its copies
-//  when it takes control back; and none books delivery it did not command (PodState).
+//  an export carries no local state, live session or pending command; this controller's own
+//  handle for the pod travels only in its `localState`, which the host saves and hands back at
+//  the next adopt; an adopter owns the in-flight doses under the exporter's identities; a
+//  controller that released drops its copies when it takes control back; and none books
+//  delivery it did not command (PodState).
 //
 //  Copyright © 2026 LoopKit Authors. All rights reserved.
 //
@@ -23,24 +25,42 @@ extension OmniPumpManager: DeviceConfigurationSharing {
         state.sharedConfiguration(managerIdentifier: pluginIdentifier)
     }
 
-    /// The state `init(adopting:)` builds from, with this controller's own handle if it has met
-    /// the pod; `takeControl()` searches if it has not.
-    static func adoptedRawState(from configuration: SharedDeviceConfiguration) -> RawStateValue? {
+    /// The state `init(adopting:localState:)` builds from, with this controller's own handle if
+    /// `localState` holds one for the same pod; `takeControl()` searches if not.
+    static func adoptedRawState(from configuration: SharedDeviceConfiguration, localState: [String: Any]?) -> RawStateValue? {
         guard let shared = OmniPumpManagerState(rawValue: configuration.state) else {
             return nil
         }
-        let handle = shared.podState.flatMap { PeripheralHandleCache.identifier(forPodAddress: $0.address) }
+        let handle = shared.podState.flatMap { OmniPumpManagerState.handle(in: localState, forPodAddress: $0.address) }
         let adopted = shared.adopted(handle: handle)
-        ConnectClock.beginAttempt(adoptedHandle: adopted.podState.flatMap { pod in handle.map { (pod.address, $0) } })
+        ConnectClock.beginAttempt(adoptedHandle: handle)
         return adopted.rawValue
     }
 
     public var isConfiguredByAnotherController: Bool {
         state.configuredByAnotherController
     }
+
+    /// This controller's handle for its pod, from the manager's state.
+    public var localState: [String: Any]? {
+        state.localState
+    }
 }
 
 extension OmniPumpManagerState {
+
+    /// This controller's CoreBluetooth handle for the pod, with the pod's address so it is never
+    /// used for another pod. Handles are per device, so the export never carries one.
+    var localState: [String: Any]? {
+        guard let pod = podState, let handle = pod.bleIdentifier else { return nil }
+        return ["podAddress": pod.address, "bleIdentifier": handle]
+    }
+
+    /// The handle in `localState`, if it is for the pod at `address`.
+    static func handle(in localState: [String: Any]?, forPodAddress address: UInt32) -> String? {
+        guard let localState, localState["podAddress"] as? UInt32 == address else { return nil }
+        return localState["bleIdentifier"] as? String
+    }
 
     /// The export: facts about the pod, none of this controller's relationship to it.
     func sharedConfiguration(managerIdentifier: String) -> SharedDeviceConfiguration {
@@ -107,6 +127,16 @@ extension PodState {
     }
 }
 
+extension PodComms {
+
+    /// Drops this controller's handle for the pod; the manager's state follows through the delegate.
+    func forgetHandle() {
+        podStateLock.lock()
+        podState?.bleIdentifier = nil
+        podStateLock.unlock()
+    }
+}
+
 // MARK: - Exclusive control
 
 extension OmniPumpManager: ExclusiveDeviceControl {
@@ -121,8 +151,11 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         setState { $0.releaseControl() }
         (podComms as? BlePodComms)?.releaseConnection()
 
-        if let forgotten = ConnectClock.forgetAdoptedHandleIfNeverConnected() {
-            omnipodLogDeviceEvent("cached handle \(forgotten) never connected — forgotten; the next adopt searches")
+        // A saved handle that never connected is wrong: drop it from the pod state, so
+        // `localState` goes nil and the next adopt searches.
+        if let unproven = ConnectClock.adoptedHandleThatNeverConnected() {
+            podComms.forgetHandle()
+            omnipodLogDeviceEvent("saved handle \(unproven) never connected — forgotten; the next adopt searches")
         }
     }
 
@@ -181,12 +214,12 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         podComms is BlePodComms && state.podState != nil && state.podState?.bleIdentifier == nil
     }
 
-    /// An adopter searches for a BLE pod unless this controller has a handle of its own for it.
-    public static func takeControlNeedsSearch(adopting configuration: SharedDeviceConfiguration) -> Bool {
+    /// An adopter searches for a BLE pod unless `localState` holds this controller's handle for it.
+    public static func takeControlNeedsSearch(adopting configuration: SharedDeviceConfiguration, localState: [String: Any]?) -> Bool {
         guard let shared = OmniPumpManagerState(rawValue: configuration.state),
               shared.podType == dashType || shared.podType == omnipod5Type,
               let pod = shared.podState else { return false }
-        return PeripheralHandleCache.identifier(forPodAddress: pod.address) == nil
+        return OmniPumpManagerState.handle(in: localState, forPodAddress: pod.address) == nil
     }
 
     public var hostRadioNeedsReset: Bool {
@@ -266,13 +299,13 @@ enum ConnectClock {
     /// When CBErrorDomain#11 (connection limit) was last seen, for the wedge test.
     private static var _lastCode11At: Date?
     private static var _attemptStartedAt: Date?
-    private static var _adoptedHandle: (address: UInt32, handle: String)?
+    private static var _adoptedHandle: String?
 
     /// When the current take began: at adopt, or at a take after a release.
     static var attemptStartedAt: Date? { lock.lock(); defer { lock.unlock() }; return _attemptStartedAt }
     static var connectCount: Int { lock.lock(); defer { lock.unlock() }; return _connectCount }
 
-    static func beginAttempt(adoptedHandle: (address: UInt32, handle: String)?) {
+    static func beginAttempt(adoptedHandle: String?) {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
         _lastReason = nil; _reasons = []; _lastDisconnectReason = nil; _lastCode11At = nil
@@ -281,16 +314,15 @@ enum ConnectClock {
         lock.unlock()
     }
 
-    /// A handle this attempt attached from the cache that never connected is wrong: forget it, so
-    /// the next adopt searches. Once per attempt; returns the forgotten handle.
-    static func forgetAdoptedHandleIfNeverConnected() -> String? {
+    /// The handle this attempt's adopt attached from `localState`, if it never connected. Once per
+    /// attempt; the caller drops it.
+    static func adoptedHandleThatNeverConnected() -> String? {
         lock.lock()
         let adopted = _adoptedHandle, connected = _connectCount > 0
         _adoptedHandle = nil
         lock.unlock()
         guard let adopted, !connected else { return nil }
-        PeripheralHandleCache.forget(podAddress: adopted.address)
-        return adopted.handle
+        return adopted
     }
 
     /// CoreBluetooth's reason a link ended; nil means this process cancelled it.

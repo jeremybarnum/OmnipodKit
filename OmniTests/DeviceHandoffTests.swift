@@ -21,15 +21,8 @@ final class DeviceHandoffTests: XCTestCase {
     let measuredAt = Date(timeIntervalSinceNow: -60)
     let watchHandle = "0B1D2C3E-0000-4000-8000-00000000B002"
 
-    override func setUp() {
-        super.setUp()
-        PeripheralHandleCache.removeAll()
-    }
-
-    override func tearDown() {
-        PeripheralHandleCache.removeAll()
-        super.tearDown()
-    }
+    /// What an adopter that met this pod before saved: its own handle for it.
+    var watchLocalState: [String: Any] { ["podAddress": address, "bleIdentifier": watchHandle] }
 
     /// A DASH pod mid-session: a handle, live session keys, a pending command and a bolus running.
     func makePodState() -> PodState {
@@ -64,8 +57,8 @@ final class DeviceHandoffTests: XCTestCase {
         state.sharedConfiguration(managerIdentifier: "Omni")
     }
 
-    func adopt(_ configuration: SharedDeviceConfiguration) throws -> OmniPumpManagerState {
-        let raw = try XCTUnwrap(OmniPumpManager.adoptedRawState(from: configuration))
+    func adopt(_ configuration: SharedDeviceConfiguration, localState: [String: Any]? = nil) throws -> OmniPumpManagerState {
+        let raw = try XCTUnwrap(OmniPumpManager.adoptedRawState(from: configuration, localState: localState))
         return try XCTUnwrap(OmniPumpManagerState(rawValue: raw))
     }
 
@@ -83,6 +76,7 @@ final class DeviceHandoffTests: XCTestCase {
         let transport = pod?["bleMessageTransportState"] as? [String: Any]
 
         XCTAssertNil(pod?["bleIdentifier"], "the handle is this controller's")
+        XCTAssertNotNil(state.localState, "it stays behind in this controller's local state")
         XCTAssertEqual(configuration.state["podConnectionReleased"] as? Bool, false, "the released flag is this controller's")
         XCTAssertEqual(configuration.state["configuredByAnotherController"] as? Bool, false)
         XCTAssertNil(pod?["unacknowledgedCommand"], "no pending command travels")
@@ -138,33 +132,51 @@ final class DeviceHandoffTests: XCTestCase {
     }
 
     func testAnAdopterThatMetThePodUsesItsOwnHandle() throws {
-        PeripheralHandleCache.store(watchHandle, forPodAddress: address)
-        let adopter = try adopt(export(makeState()))
+        let adopter = try adopt(export(makeState()), localState: watchLocalState)
         XCTAssertEqual(adopter.podState?.bleIdentifier, watchHandle)
+        XCTAssertEqual(adopter.localState?["bleIdentifier"] as? String, watchHandle, "and hands it back to the host")
+    }
+
+    func testAHandleForAnotherPodIsIgnored() throws {
+        let otherPod: [String: Any] = ["podAddress": address &+ 1, "bleIdentifier": watchHandle]
+        XCTAssertNil(try adopt(export(makeState()), localState: otherPod).podState?.bleIdentifier)
+        XCTAssertTrue(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState()), localState: otherPod))
+    }
+
+    func testTheLocalStateSurvivesAPropertyListRoundTrip() throws {
+        let data = try PropertyListSerialization.data(fromPropertyList: watchLocalState, format: .binary, options: 0)
+        let saved = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        XCTAssertEqual(try adopt(export(makeState()), localState: saved).podState?.bleIdentifier, watchHandle)
     }
 
     /// Asked of a standing copy before Start: only a pod this controller holds no handle for.
     func testAnExportSaysWhetherAdoptingItWillSearch() {
-        XCTAssertTrue(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState())))
-        PeripheralHandleCache.store(watchHandle, forPodAddress: address)
-        XCTAssertFalse(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState())))
+        XCTAssertTrue(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState()), localState: nil))
+        XCTAssertFalse(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState()), localState: watchLocalState))
         XCTAssertFalse(OmniPumpManager.takeControlNeedsSearch(
-            adopting: SharedDeviceConfiguration(managerIdentifier: "Omni", asOf: Date(), state: [:])))
+            adopting: SharedDeviceConfiguration(managerIdentifier: "Omni", asOf: Date(), state: [:]), localState: nil))
     }
 
-    func testAHandleThatNeverConnectedIsForgottenAtRelease() throws {
-        PeripheralHandleCache.store(watchHandle, forPodAddress: address)
-        _ = try adopt(export(makeState()))
-        XCTAssertEqual(ConnectClock.forgetAdoptedHandleIfNeverConnected(), watchHandle)
-        XCTAssertNil(PeripheralHandleCache.identifier(forPodAddress: address), "the next adopt searches")
+    /// What `releaseControl()` does with an unproven handle, through the pod comms as it does it.
+    func testAHandleThatNeverConnectedIsDroppedAtRelease() throws {
+        var adopter = try adopt(export(makeState()), localState: watchLocalState)
+        let podComms = PodComms(podState: adopter.podState, podType: dashType)
+        XCTAssertEqual(ConnectClock.adoptedHandleThatNeverConnected(), watchHandle)
+        podComms.forgetHandle()
+        adopter.updatePodStateFromPodComms(podComms.podState)
+        XCTAssertNil(adopter.localState, "the host saves nil, so the next adopt searches")
+        XCTAssertTrue(OmniPumpManager.takeControlNeedsSearch(adopting: export(makeState()), localState: adopter.localState))
     }
 
     func testAHandleThatConnectedIsKept() throws {
-        PeripheralHandleCache.store(watchHandle, forPodAddress: address)
-        _ = try adopt(export(makeState()))
+        _ = try adopt(export(makeState()), localState: watchLocalState)
         ConnectClock.noteConnect(appState: "fg")
-        XCTAssertNil(ConnectClock.forgetAdoptedHandleIfNeverConnected())
-        XCTAssertEqual(PeripheralHandleCache.identifier(forPodAddress: address), watchHandle)
+        XCTAssertNil(ConnectClock.adoptedHandleThatNeverConnected())
+    }
+
+    func testAHandleFoundBySearchingIsNotDroppedAtRelease() throws {
+        _ = try adopt(export(makeState()))
+        XCTAssertNil(ConnectClock.adoptedHandleThatNeverConnected(), "only a handle the adopt attached is on trial")
     }
 
     func testAnAdopterBooksNoUntrackedBolusAsItsOwn() throws {

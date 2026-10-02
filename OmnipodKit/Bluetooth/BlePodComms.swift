@@ -67,12 +67,9 @@ class BlePodComms: PodComms {
     }
 
     /// The takeover search adopted the pod as this device's own peripheral: record it as the pod's
-    /// handle, and remember it so the next adopt of this pod skips the search.
+    /// handle. The manager's `localState` carries it to the next adopt of this pod.
     func omnipodDidAdoptLoanPod(uuidString: String) {
         log.default("adopted pod bleIdentifier %{public}@", uuidString)
-        if let address = podState?.address {
-            PeripheralHandleCache.store(uuidString, forPodAddress: address)
-        }
         // Safe to lock: adoption is strictly pre-connect, and every other mutator runs in a session.
         podStateLock.lock()
         let stale = podState?.bleIdentifier

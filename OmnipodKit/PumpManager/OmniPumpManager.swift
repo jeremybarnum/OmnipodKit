@@ -192,8 +192,8 @@ public class OmniPumpManager: RileyLinkPumpManager {
     }
 
     /// DeviceConfigurationSharing: build from another controller's export (+DeviceHandoff).
-    public required convenience init?(adopting configuration: SharedDeviceConfiguration) {
-        guard let rawState = OmniPumpManager.adoptedRawState(from: configuration) else {
+    public required convenience init?(adopting configuration: SharedDeviceConfiguration, localState: [String: Any]?) {
+        guard let rawState = OmniPumpManager.adoptedRawState(from: configuration, localState: localState) else {
             return nil
         }
         self.init(rawState: rawState)

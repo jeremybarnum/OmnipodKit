@@ -2060,38 +2060,3 @@ extension BluetoothManager: CBCentralManagerDelegate {
         }
     }
 }
-
-// MARK: - Per-pod peripheral handles
-
-/// This device's CoreBluetooth handle for each pod it has met, keyed by pod address, so an adopt
-/// can skip the search. A handle proven wrong is forgotten, so the next adopt searches.
-enum PeripheralHandleCache {
-    /// Kept as is so handles already stored survive.
-    private static let defaultsKey = "OmnipodKit.podLoanBleIdentifiers"
-    private static let log = OSLog(subsystem: "com.loopkit.OmnipodKit", category: "PeripheralHandleCache")
-
-    private static func key(_ podAddress: UInt32) -> String { String(format: "%08X", podAddress) }
-
-    static func store(_ uuidString: String, forPodAddress podAddress: UInt32) {
-        var map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
-        guard map[key(podAddress)] != uuidString else { return }
-        map[key(podAddress)] = uuidString
-        UserDefaults.standard.set(map, forKey: defaultsKey)
-        os_log("stored handle %{public}@ for pod %{public}@", log: log, type: .default, uuidString, key(podAddress))
-    }
-
-    static func identifier(forPodAddress podAddress: UInt32) -> String? {
-        let map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
-        return map[key(podAddress)]
-    }
-
-    static func forget(podAddress: UInt32) {
-        var map = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] ?? [:]
-        guard map.removeValue(forKey: key(podAddress)) != nil else { return }
-        UserDefaults.standard.set(map, forKey: defaultsKey)
-        os_log("forgot handle for pod %{public}@", log: log, type: .default, key(podAddress))
-    }
-
-    /// Test seam.
-    static func removeAll() { UserDefaults.standard.removeObject(forKey: defaultsKey) }
-}
