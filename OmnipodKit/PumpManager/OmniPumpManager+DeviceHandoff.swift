@@ -186,12 +186,9 @@ extension OmniPumpManager: ExclusiveDeviceControl {
     }
 
     public var isControlReady: Bool {
-        #if targetEnvironment(simulator)
-        // The simulator has no radio, so no peripheral ever connects; any pod counts as ready.
-        return state.podState != nil
-        #else
+        // A mocked pod has no radio, so no peripheral ever connects; any pod counts as ready.
+        if mocksPod { return state.podState != nil }
         return peripheralStateDescription == "connected"
-        #endif
     }
 
     /// Goes looking for the pod by address instead of waiting to hear it.
@@ -270,21 +267,21 @@ extension OmniPumpManager: PumpDeliveryOdometer {
 
     /// A real status read, bypassing the freshness shortcut in ensureCurrentPumpData.
     public func refreshDeliveredUnits() async -> Bool {
-        #if targetEnvironment(simulator)
-        // No radio in the simulator: fake the round-trip and stamp a measurement, as jumpStartPod does.
-        try? await Task.sleep(nanoseconds: 1_200_000_000)
-        setState { state in
-            if state.podState?.lastInsulinMeasurements == nil {
-                var pod = state.podState
-                let delivered = pod?.setupUnitsDelivered ?? Pod.primeUnits
-                pod?.lastInsulinMeasurements = PodInsulinMeasurements(
-                    insulinDelivered: delivered, reservoirLevel: nil, validTime: Date())
-                state.updatePodStateFromPodComms(pod)
+        // A mocked pod has no radio: fake the round-trip and stamp a measurement, as jumpStartPod does.
+        if mocksPod {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            setState { state in
+                if state.podState?.lastInsulinMeasurements == nil {
+                    var pod = state.podState
+                    let delivered = pod?.setupUnitsDelivered ?? Pod.primeUnits
+                    pod?.lastInsulinMeasurements = PodInsulinMeasurements(
+                        insulinDelivered: delivered, reservoirLevel: nil, validTime: Date())
+                    state.updatePodStateFromPodComms(pod)
+                }
             }
+            log.default("refreshDeliveredUnits simulated OK (mocked pod, no radio)")
+            return true
         }
-        log.default("refreshDeliveredUnits simulated OK (no radio in the simulator)")
-        return true
-        #else
         return await withCheckedContinuation { done in
             getPodStatus(canOptimize: false) { result in
                 if case .success(let status) = result, status != nil {
@@ -294,7 +291,6 @@ extension OmniPumpManager: PumpDeliveryOdometer {
                 }
             }
         }
-        #endif
     }
 }
 

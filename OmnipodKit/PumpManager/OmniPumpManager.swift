@@ -2712,10 +2712,9 @@ extension OmniPumpManager: PumpManager {
     }
 
     public func ensureCurrentPumpData(completion: ((Date?) -> Void)?) {
-        #if targetEnvironment(simulator)
-        // No radio in the simulator, so a status fetch would always fail: stamp a fresh measurement
+        // A mocked pod has no radio, so a status fetch would always fail: stamp a fresh measurement
         // and report now, as refreshDeliveredUnits does.
-        if state.podState != nil {
+        if mocksPod, state.podState != nil {
             setState { state in
                 var pod = state.podState
                 let delivered = pod?.lastInsulinMeasurements?.delivered ?? pod?.setupUnitsDelivered ?? Pod.primeUnits
@@ -2726,7 +2725,6 @@ extension OmniPumpManager: PumpManager {
             completion?(Date())
             return
         }
-        #endif
         let shouldFetchStatus = setStateWithResult { (state) -> Bool? in
             guard state.hasActivePod else {
                 return nil // No active pod
@@ -2946,13 +2944,11 @@ extension OmniPumpManager: PumpManager {
             return
         }
 
-        #if targetEnvironment(simulator)
-        // No radio in the simulator; cancelling with no temp running changes nothing on the pod.
-        if duration < .ulpOfOne, podState.unfinalizedTempBasal == nil {
+        // A mocked pod has no radio; cancelling with no temp running changes nothing on it.
+        if mocksPod, duration < .ulpOfOne, podState.unfinalizedTempBasal == nil {
             completion(nil)
             return
         }
-        #endif
 
         // Round to nearest supported rate
         let rate = roundToSupportedBasalRate(unitsPerHour: unitsPerHour)
