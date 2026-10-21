@@ -37,10 +37,6 @@ extension OmniPumpManager: DeviceConfigurationSharing {
         return adopted.rawValue
     }
 
-    public var isConfiguredByAnotherController: Bool {
-        state.configuredByAnotherController
-    }
-
     /// This controller's handle for its pod, from the manager's state.
     public var localState: [String: Any]? {
         state.localState
