@@ -66,14 +66,14 @@ class BlePodComms: PodComms {
     /// controller established sessions since our last contact. nil until the first this process.
     private(set) var lastSqnResync: (at: Date, ours: Int, pods: Int)?
 
-    /// Go looking for the pod by address instead of waiting to hear it (a stalled take).
-    func escalateTakeover(podId: UInt32) {
-        bluetoothManager.escalateLoanReclaim(podId: podId)
-    }
-
-    /// The stalled take is over: end its scan-adopt.
-    func endEscalation() {
-        bluetoothManager.endLoanReclaimEscalation()
+    /// After `delay`, scan for the pod by address if `stillWaiting` still returns the link's
+    /// diagnostics (nil: the pod answered or control was released). A later take replaces it.
+    func scheduleTakeEscalation(podId: UInt32, after delay: TimeInterval, stillWaiting: @escaping () -> String?) {
+        bluetoothManager.scheduleTakeEscalation(podId: podId, after: delay) { [weak self] in
+            guard let diagnostics = stillWaiting() else { return false }
+            self?.omnipodLogDeviceEvent("take: the pod has not answered after \(Int(delay)) s — scanning for it by address · \(diagnostics)")
+            return true
+        }
     }
 
     /// The takeover search adopted the pod as this device's own peripheral: record it as the pod's
@@ -919,6 +919,8 @@ extension BlePodComms: PeripheralManagerDelegate {
                 try manager.enableNotifications() // Seemingly this cannot be done before the hello command, or the pod disconnects
                 try establishNewSession()
                 needsSessionEstablishment = false
+                // The take is over: a scan it escalated to ends, and connects go by the handle again.
+                bluetoothManager.endLoanReclaimEscalation()
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
                 // Swallowed (upstream behaviour); bleRunSession refuses to run on the old keys.
