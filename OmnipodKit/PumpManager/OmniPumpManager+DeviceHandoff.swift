@@ -177,7 +177,8 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         // A take whose pod has not answered by then goes looking for it by address, until it
         // answers or control is released. The pod's first answer (a session established) cancels
         // the pending escalation and ends an armed one; a link dropped after it does not count.
-        if let address = state.podState?.address {
+        // A take of a pod already connected has its answer: nothing to wait for.
+        if !isControlReady, let address = state.podState?.address {
             ble.scheduleTakeEscalation(podId: address, after: Self.takeEscalateAfter) { [weak self] in
                 guard let self, !self.isControlReleased, !self.isControlReady else { return nil }
                 return self.connectionDiagnostics()
