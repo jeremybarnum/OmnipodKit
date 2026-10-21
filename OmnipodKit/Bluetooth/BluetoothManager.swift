@@ -842,6 +842,8 @@ class BluetoothManager: NSObject {
     /// would wait on the scan. A connect the adopt already started is left to finish.
     func endLoanReclaimEscalation() {
         managerQueue.async {
+            // The pod has answered: a pending escalation for this take is cancelled, not only an armed one.
+            self.takeEscalationToken = nil
             guard self.loanTakeoverPodId != nil, self.takeoverScanIsEscalation else { return }
             self.takeoverScanIsEscalation = false
             self.loanScanMarkerReason = "escalation ended"
