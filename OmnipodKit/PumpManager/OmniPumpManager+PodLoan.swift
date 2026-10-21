@@ -227,22 +227,26 @@ extension OmniPumpManager {
         // (`podLoanInsulinDelivered` must be non-nil — the granted mock pod has never had a real
         // status read, so it arrives nil). Everything else — grant intake, seeds, phase machine,
         // glance, dosing books — runs the REAL code. Same pattern as upstream's jumpStartPod:
-        // fabricate the radio's answer, never the bookkeeping.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.2) { [weak self] in
-            guard let self = self else { return completion(false) }
-            self.setState { state in
-                if state.podState?.lastInsulinMeasurements == nil {
-                    let delivered = state.podState?.setupUnitsDelivered ?? Pod.primeUnits
-                    state.podState?.lastInsulinMeasurements = PodInsulinMeasurements(
-                        insulinDelivered: delivered,
-                        reservoirLevel: nil,
-                        validTime: Date())
+        // fabricate the radio's answer, never the bookkeeping. Only for a mocked pod: a pod
+        // simulated over the Bluetooth stand-in answers a real read.
+        if mocksPod {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                guard let self = self else { return completion(false) }
+                self.setState { state in
+                    if state.podState?.lastInsulinMeasurements == nil {
+                        let delivered = state.podState?.setupUnitsDelivered ?? Pod.primeUnits
+                        state.podState?.lastInsulinMeasurements = PodInsulinMeasurements(
+                            insulinDelivered: delivered,
+                            reservoirLevel: nil,
+                            validTime: Date())
+                    }
                 }
+                self.log.default("SIM LOAN: podLoanReadStatus simulated OK (mocked pod, no radio)")
+                completion(true)
             }
-            self.log.default("SIM LOAN: podLoanReadStatus simulated OK (no radio in the simulator)")
-            completion(true)
+            return
         }
-        #else
+        #endif
         getPodStatus(canOptimize: false) { result in
             if case .success(let status) = result, status != nil {
                 completion(true)
@@ -250,7 +254,6 @@ extension OmniPumpManager {
                 completion(false)
             }
         }
-        #endif
     }
 
     /// Chases the verdict on the pending command NOW: one forced status read, then the
@@ -316,11 +319,11 @@ extension OmniPumpManager {
         // SIM LOAN HARNESS (#61): no radio -> no peripheral ever reaches .connected, which
         // starves the phone's reclaim verification (PodLoanPhoneController gates the verifying
         // status read on this) and pins every post-loan settle window at its 5-minute ceiling.
-        // A jump-started sim pod is by definition "home", so say so.
-        return state.podState != nil
-        #else
-        return podLoanConnectionStateDescription == "connected"
+        // A jump-started sim pod is by definition "home", so say so. Only for a mocked pod: a pod
+        // simulated over the Bluetooth stand-in has a real connection state.
+        if mocksPod { return state.podState != nil }
         #endif
+        return podLoanConnectionStateDescription == "connected"
     }
 
     /// The pod peripheral's ACTUAL CoreBluetooth state, for diagnosing reclaim failures.
