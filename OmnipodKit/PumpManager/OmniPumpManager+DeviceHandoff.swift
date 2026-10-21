@@ -168,12 +168,26 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         if state.podConnectionReleased {
             resumeControl()
         }
+        guard let ble = podComms as? BlePodComms else { return }
         if takeControlNeedsSearch, let address = state.podState?.address {
-            (podComms as? BlePodComms)?.beginTakeoverSearch(podId: address)
+            ble.beginTakeoverSearch(podId: address)
         } else {
-            (podComms as? BlePodComms)?.rearmConnection()
+            ble.rearmConnection()
+        }
+        // A take whose pod has not answered by then goes looking for it by address, until it
+        // answers or control is released. The pod's first answer (a session established) cancels
+        // the pending escalation and ends an armed one; a link dropped after it does not count.
+        // A take of a pod already connected has its answer: nothing to wait for.
+        if !isControlReady, let address = state.podState?.address {
+            ble.scheduleTakeEscalation(podId: address, after: Self.takeEscalateAfter) { [weak self] in
+                guard let self, !self.isControlReleased, !self.isControlReady else { return nil }
+                return self.connectionDiagnostics()
+            }
         }
     }
+
+    /// How long a take waits for the pod's answer before it scans for the pod by address.
+    static let takeEscalateAfter: TimeInterval = 12
 
     /// Lifts the release (see PodState.resolveAfterForeignControl).
     private func resumeControl() {
@@ -194,33 +208,13 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         #endif
     }
 
-    /// Goes looking for the pod by address instead of waiting to hear it.
-    @discardableResult
-    public func escalateTakeControl() -> String? {
-        guard let address = state.podState?.address, let ble = podComms as? BlePodComms else { return nil }
-        if state.podConnectionReleased {
-            resumeControl()
-        }
-        ble.escalateTakeover(podId: address)
-        return String(format: "scan-adopt armed for pod 0x%X", address)
-    }
-
-    /// Ends the scan-adopt `escalateTakeControl()` armed: commands connect by this device's handle again.
-    public func endTakeEscalation() {
-        (podComms as? BlePodComms)?.endEscalation()
-    }
-
-    public func connectionDiagnostics() -> String? {
+    /// What the link has been doing, for the device log.
+    func connectionDiagnostics() -> String? {
         guard let ble = (podComms as? BlePodComms)?.bluetoothManager else { return nil }
         return "\(ble.loanBleDiagnostics) pod=\(peripheralStateDescription) · \(ConnectClock.summary(since: ConnectClock.attemptStartedAt))"
     }
 
-    /// The last EAP SQN resync: another controller established sessions since our last contact.
-    public var lastForeignSessionAt: Date? {
-        (podComms as? BlePodComms)?.lastSqnResync?.at
-    }
-
-    public var takeControlNeedsSearch: Bool {
+    var takeControlNeedsSearch: Bool {
         podComms is BlePodComms && state.podState != nil && state.podState?.bleIdentifier == nil
     }
 

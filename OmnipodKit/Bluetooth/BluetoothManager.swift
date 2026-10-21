@@ -817,13 +817,23 @@ class BluetoothManager: NSObject {
         log.default("BluetoothManager #%{public}@ DEINIT", instanceID)
     }
 
-    /// Arm a scan-adopt for a pod a pending connect has not reached; either controller may call it.
-    /// The central is kept, not rebuilt: it owns the restore identifier a background relaunch needs.
-    func escalateLoanReclaim(podId: UInt32) {
+    /// A take's pending escalation; a later take replaces it. managerQueue-isolated.
+    private var takeEscalationToken: UUID?
+
+    /// After `delay`, arm a scan-adopt for a pod the take has not reached, if `stillWaiting` says
+    /// so. The central is kept, not rebuilt: it owns the restore identifier a background relaunch needs.
+    func scheduleTakeEscalation(podId: UInt32, after delay: TimeInterval, stillWaiting: @escaping () -> Bool) {
         managerQueue.async {
-            self.log.default("take escalation — arming scan-adopt for pod 0x%x (central preserved)", podId)
-            self.takeoverScanIsEscalation = true
-            self.armTakeoverScan(podId: podId, reason: "escalate")
+            let token = UUID()
+            self.takeEscalationToken = token
+            self.managerQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self, self.takeEscalationToken == token else { return }
+                self.takeEscalationToken = nil
+                guard stillWaiting() else { return }
+                self.log.default("take escalation — arming scan-adopt for pod 0x%x (central preserved)", podId)
+                self.takeoverScanIsEscalation = true
+                self.armTakeoverScan(podId: podId, reason: "escalate")
+            }
         }
     }
 
@@ -832,6 +842,8 @@ class BluetoothManager: NSObject {
     /// would wait on the scan. A connect the adopt already started is left to finish.
     func endLoanReclaimEscalation() {
         managerQueue.async {
+            // The pod has answered: a pending escalation for this take is cancelled, not only an armed one.
+            self.takeEscalationToken = nil
             guard self.loanTakeoverPodId != nil, self.takeoverScanIsEscalation else { return }
             self.takeoverScanIsEscalation = false
             self.loanScanMarkerReason = "escalation ended"
