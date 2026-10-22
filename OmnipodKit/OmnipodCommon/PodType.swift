@@ -68,6 +68,19 @@ struct PodType: CustomStringConvertible, Equatable {
         }
     }
 
+    var modelName: String? {
+        switch podType {
+        case .productIdEros:
+            return "Omnipod Classic"
+        case .productIdDash:
+            return "Omnipod DASH"
+        case .productIdOmnipod5:
+            return "Omnipod 5"
+        default:
+            return nil
+        }
+    }
+
     // Used for internal logging purposes
     var briefName: String {
         switch podType {
@@ -113,6 +126,18 @@ struct PodType: CustomStringConvertible, Equatable {
             return 0
         default:
             return nearZeroBasalRate
+        }
+    }
+
+    // Basic pod disconnect interval with no activity
+    var disconnectInterval: TimeInterval {
+        switch podType {
+        case .productIdDash:
+            return .minutes(3)
+        case .productIdOmnipod5:
+            return .minutes(5)
+        default:
+            return 0 // Not applicable
         }
     }
 

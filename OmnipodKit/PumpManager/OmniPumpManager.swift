@@ -86,7 +86,7 @@ extension OmniPumpManagerError: LocalizedError {
 public class OmniPumpManager: RileyLinkPumpManager {
 
     public var inSignalLoss: Bool {
-        isSignalLost(at: Date(), lastPumpDataReportDate: state.lastPumpDataReportDate)
+        isSignalLost(at: Date(), lastPodUpdate: state.podState?.podTimeUpdated)
     }
 
     public var isInoperable: Bool {
@@ -378,8 +378,8 @@ public class OmniPumpManager: RileyLinkPumpManager {
         let rileyLinkIsInUse = self.state.podType.isEros || self.state.podKeepAlive == .rileyLink
         if rileyLinkIsInUse {
             rileyLinkDeviceProvider.timerTickEnabled =
-                self.state.isPumpDataStale || mustProvide || /// RL ticks needed for traditional BLE wakups
-                self.state.podKeepAlive == .rileyLink // RL ticks needed for PodKeepAlive rileyLink option
+                self.state.isPumpDataStale || mustProvide || /// RL ticks needed for traditional BLE wakeups
+                self.state.podKeepAlive == .rileyLink /// RL ticks needed for PodKeepAlive rileyLink option
         } else {
             provideHeartbeat = mustProvide
             // BLE pod: when the host needs us to provide the heartbeat (e.g. a CGM that can't), run the
@@ -630,7 +630,7 @@ extension OmniPumpManager {
             return HKDevice(
                 name: pluginIdentifier,
                 manufacturer: "Insulet",
-                model: state.podType.description,
+                model: state.podType.modelName,
                 hardwareVersion: String(state.podType.rawValue),
                 firmwareVersion: podState.firmwareVersion + " " + podState.iFirmwareVersion,
                 softwareVersion: String(OmnipodKitVersionNumber),
@@ -641,7 +641,7 @@ extension OmniPumpManager {
             return HKDevice(
                 name: pluginIdentifier,
                 manufacturer: "Insulet",
-                model: state.podType.description,
+                model: state.podType.modelName,
                 hardwareVersion: nil,
                 firmwareVersion: nil,
                 softwareVersion: String(OmnipodKitVersionNumber),
@@ -1033,7 +1033,7 @@ extension OmniPumpManager {
                     localizedMessage: LocalizedString("Insulin Suspended", comment: "Status highlight that insulin delivery was suspended."),
                     imageName: "pause.circle.fill",
                     state: .warning)
-            } else if isSignalLost(at: date, lastPumpDataReportDate: state.lastPumpDataReportDate) {
+            } else if isSignalLost(at: date, lastPodUpdate: state.podState?.podTimeUpdated) {
                 return PumpStatusHighlight(
                     localizedMessage: LocalizedString("Signal Loss", comment: "Status highlight when communications with the pod haven't happened recently."),
                     imageName: "exclamationmark.circle.fill",
@@ -1048,8 +1048,10 @@ extension OmniPumpManager {
         }
     }
 
-    private func isSignalLost(at date: Date, lastPumpDataReportDate: Date?) -> Bool {
-        date.timeIntervalSince(lastPumpDataReportDate ?? .distantPast) > .minutes(12)
+    /// Signal loss is defined as not having seen a pod response in over 12 minutes.
+    private func isSignalLost(at date: Date, lastPodUpdate: Date?) -> Bool {
+        let timeSinceLastResponse = date.timeIntervalSince(lastPodUpdate ?? .distantPast)
+        return timeSinceLastResponse > .minutes(12)
     }
 
     func isRunningManualTempBasal(for state: OmniPumpManagerState) -> Bool {

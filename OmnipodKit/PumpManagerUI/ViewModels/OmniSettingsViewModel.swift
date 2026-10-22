@@ -159,14 +159,14 @@ class OmniSettingsViewModel: ObservableObject {
         return pumpManager.isClockOffset
     }
 
-    var isPodDataStale: Bool {
-        return Date().timeIntervalSince(pumpManager.lastSync ?? .distantPast) > .minutes(12)
+    var inSignalLoss: Bool {
+        return pumpManager.inSignalLoss
     }
 
     var recoveryText: String? {
         if case .fault = podCommState {
             return LocalizedString("⚠️ Insulin delivery stopped. Change Pod now.", comment: "The action string on pod status page when pod faulted")
-        } else if podOk && isPodDataStale {
+        } else if podOk && inSignalLoss {
             return LocalizedString("Make sure your phone and pod are close to each other. If communication issues persist, move to a new area.", comment: "The action string on pod status page when pod data is stale")
         } else if let serviceTimeRemaining = pumpManager.podServiceTimeRemaining, serviceTimeRemaining <= Pod.serviceDuration - Pod.nominalPodLife {
             if let serviceTimeRemainingString = serviceTimeRemainingString {
@@ -477,7 +477,7 @@ class OmniSettingsViewModel: ObservableObject {
                                 String(format: "%03u", status.faultEventCode.rawValue))
             }
         case .active:
-            if isPodDataStale {
+            if inSignalLoss {
                 return LocalizedString("Signal Loss", comment: "Error message for reservoir view during signal loss")
             } else {
                 return nil

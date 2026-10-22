@@ -39,7 +39,7 @@ struct PodKeepAliveView: View {
             List {
                 Section {
                     VStack(alignment: .center, spacing: 4) {
-                        Text("Issues status requests to minimize Bluetooth disconnects. The default When Open selection should be sufficient for all iPhone and Pod combinations.", comment: "Summary of the Pod Keep Alive concept")
+                        Text("Pod keep alive options to issue background status requests to minimize pod disconnects. Should no longer be needed for any iPhone and pod combination.", comment: "Summary of the Pod Keep Alive concept")
                             .font(.body)
                             .foregroundColor(.primary)
                     }
@@ -53,7 +53,9 @@ struct PodKeepAliveView: View {
                                 title: Text(preference.title),
                                 description: Text(preference.description),
                                 isSelected: Binding(
-                                    get: { self.preference == preference },
+                                    /// Checkmark on match which includes the internal .whenOpen matching .disabled
+                                    get: { self.preference == preference ||
+                                        (self.preference == .whenOpen && preference == .disabled) },
                                     set: { isSelected in
                                         if isSelected {
                                             self.preference = preference

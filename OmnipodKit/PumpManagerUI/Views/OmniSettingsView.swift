@@ -281,9 +281,7 @@ struct OmniSettingsView: View  {
                                 // Executed after playTestBeeps() returns or throws
                                 sendingTestBeepsCommand = false
                             }
-                            do {
-                                try await viewModel.playTestBeeps()
-                            }
+                            try? await viewModel.playTestBeeps()
                             // No errors are displayed when using the sound icon to play test beeps.
                             // Pod Diagnostics->Play Test Beeps will play beeps & display any errors.
                         }
@@ -672,7 +670,7 @@ struct OmniSettingsView: View  {
                             Text(localizedPodKeepAliveStr)
                                 .foregroundColor(Color.primary)
                             Spacer()
-                            Text(viewModel.podKeepAlivePreference.title)
+                            Text(viewModel.podKeepAlivePreference.displayTitle)
                                 .foregroundColor(Color.secondary)
                         }
                     }

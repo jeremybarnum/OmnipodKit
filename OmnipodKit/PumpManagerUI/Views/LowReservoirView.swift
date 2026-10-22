@@ -139,7 +139,7 @@ struct LowReservoirView: View {
                 Text(formatLowReservoirAlertValue(value))
             }
         }.pickerStyle(WheelPickerStyle())
-        .onChange(of: selectedValue) { value in
+        .onChange(of: selectedValue) { _, value in
             valueUpdated?(value)
         }
     }
