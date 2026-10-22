@@ -222,9 +222,6 @@ extension OmniPumpManager: ExclusiveDeviceControl {
         return OmniPumpManagerState.handle(in: localState, forPodAddress: pod.address) == nil
     }
 
-    public var hostRadioNeedsReset: Bool {
-        ConnectClock.wedgeSignature(since: ConnectClock.attemptStartedAt)
-    }
 
     /// The pod peripheral's CoreBluetooth state, for diagnostics.
     var peripheralStateDescription: String {
@@ -302,8 +299,6 @@ enum ConnectClock {
     /// Kept apart from `_lastReason`: a retry storm floods failures and would evict the one
     /// reason an established link died for.
     private static var _lastDisconnectReason: String?
-    /// When CBErrorDomain#11 (connection limit) was last seen, for the wedge test.
-    private static var _lastCode11At: Date?
     private static var _attemptStartedAt: Date?
     private static var _adoptedHandle: String?
 
@@ -314,7 +309,7 @@ enum ConnectClock {
     static func beginAttempt(adoptedHandle: String?) {
         lock.lock()
         _lastConnectAt = nil; _lastDisconnectAt = nil; _connectCount = 0
-        _lastReason = nil; _reasons = []; _lastDisconnectReason = nil; _lastCode11At = nil
+        _lastReason = nil; _reasons = []; _lastDisconnectReason = nil
         _attemptStartedAt = Date()
         _adoptedHandle = adoptedHandle
         lock.unlock()
@@ -338,11 +333,6 @@ enum ConnectClock {
         return "reason=\(ns.domain)#\(ns.code)"
     }
 
-    private static func isCode11(_ error: Error?) -> Bool {
-        guard let ns = error as NSError? else { return false }
-        return ns.domain == "CBErrorDomain" && ns.code == 11
-    }
-
     static func noteConnect(appState: String) {
         lock.lock()
         _lastConnectAt = Date(); _connectCount += 1
@@ -354,7 +344,6 @@ enum ConnectClock {
     static func noteDisconnect(error: Error?, appState: String) {
         let d = describe(error)
         lock.lock()
-        if isCode11(error) { _lastCode11At = Date() }
         _lastDisconnectAt = Date(); _lastDisconnectReason = d
         _reasons.append("-\(d)@\(appState)")
         if _reasons.count > 12 { _reasons.removeFirst() }
@@ -364,27 +353,10 @@ enum ConnectClock {
     static func noteFailToConnect(error: Error?, appState: String) {
         let d = describe(error)
         lock.lock()
-        if isCode11(error) { _lastCode11At = Date() }
         _lastReason = d
         _reasons.append("x\(d)@\(appState)")
         if _reasons.count > 12 { _reasons.removeFirst() }
         lock.unlock()
-    }
-
-    /// A take is wedged if the system refused a connection slot during it or no connect landed;
-    /// only a Bluetooth toggle clears that. For takes only: a quiet pod mid-session also has zero connects.
-    static func isWedge(lastCode11At: Date?, lastConnectAt: Date?, since: Date) -> Bool {
-        if let c11 = lastCode11At, c11 >= since { return true }
-        let connectedThisAttempt = lastConnectAt.map { $0 >= since } ?? false
-        return !connectedThisAttempt
-    }
-
-    static func wedgeSignature(since start: Date?) -> Bool {
-        guard let start = start else { return false }
-        lock.lock()
-        let c11 = _lastCode11At, c = _lastConnectAt
-        lock.unlock()
-        return isWedge(lastCode11At: c11, lastConnectAt: c, since: start)
     }
 
     /// One field for a log line, relative to the attempt's start: the flap trail with each edge's

@@ -290,23 +290,6 @@ final class DeviceHandoffTests: XCTestCase {
         XCTAssertEqual(try adopt(export(makeState())).podState?.ltk, ltk)
     }
 
-    // MARK: - Wedge signature
-
-    func testWedgeIsACode11DuringTheAttempt() {
-        let start = Date()
-        XCTAssertTrue(ConnectClock.isWedge(lastCode11At: start.addingTimeInterval(5),
-                                           lastConnectAt: start.addingTimeInterval(2), since: start))
-        XCTAssertFalse(ConnectClock.isWedge(lastCode11At: start.addingTimeInterval(-60),
-                                            lastConnectAt: start.addingTimeInterval(2), since: start))
-    }
-
-    func testWedgeIsNoConnectAtAllDuringTheAttempt() {
-        let start = Date()
-        XCTAssertTrue(ConnectClock.isWedge(lastCode11At: nil, lastConnectAt: nil, since: start))
-        XCTAssertTrue(ConnectClock.isWedge(lastCode11At: nil, lastConnectAt: start.addingTimeInterval(-1), since: start))
-        XCTAssertFalse(ConnectClock.isWedge(lastCode11At: nil, lastConnectAt: start.addingTimeInterval(3), since: start))
-    }
-
     // MARK: - Fault text for the host
 
     func faulted(code: UInt8) throws -> PodState {
