@@ -78,6 +78,15 @@ class BlePodComms: PodComms {
         podStateLock.unlock()
     }
 
+    /// PODLOAN: the pod comes back from another controller, so a bolus it is giving is that
+    /// controller's (PodState.untrackedDeliveryIsForeign). Set here at the take-back itself, not only
+    /// at the sequence resync, which a pod (or the simulated pod) need not send.
+    func markUntrackedDeliveryForeign() {
+        podStateLock.lock()
+        podState?.untrackedDeliveryIsForeign = true
+        podStateLock.unlock()
+    }
+
     func beginLoanTakeover(podId: UInt32) {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }

@@ -403,11 +403,15 @@ extension OmniPumpManager {
         // Fault 049 (0x31), a dead pod. nil makes the first command's tryToValidateComms read
         // status, and the temp path then cancels before it sets.
         (podComms as? BlePodComms)?.forgetLastDeliveryStatus()
+        // ...and a bolus the pod is still giving is the other controller's, already in its records:
+        // book none of it here (a Take Back during the watch's 2 U bolus booked 3.6 U, 2026-10-23).
+        (podComms as? BlePodComms)?.markUntrackedDeliveryForeign()
         // Interlock mirror cleared FIRST — reclaiming is the owner asserting the pod back,
         // and the guard must never refuse a recovery (port-line safety note, 11ce454).
         (podComms as? BlePodComms)?.loanConnectionReleasedForBle = false
         setState { (state) in
             state.podConnectionReleased = false
+            state.podState?.untrackedDeliveryIsForeign = true
         }
         (podComms as? BlePodComms)?.rearmConnection()
     }
