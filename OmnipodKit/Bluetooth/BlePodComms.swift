@@ -414,6 +414,9 @@ class BlePodComms: PodComms {
                 // first cut guarded on `delta > 0`, which a single foreign session never
                 // satisfies (see the log note above), so it never fired. Cost: one status read.
                 podState!.lastDeliveryStatusReceived = nil
+                // ...and book none of the delivery we did not command: a bolus the other controller
+                // started is in ITS records (PodState.untrackedDeliveryIsForeign).
+                podState!.untrackedDeliveryIsForeign = true
             }
             return nil
         case .SessionKeys(let keys):

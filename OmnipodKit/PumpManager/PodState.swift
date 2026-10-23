@@ -135,6 +135,13 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
 
     var lastDeliveryStatusReceived: DeliveryStatus? // this variable is not persistent across app restarts
 
+    /// PODLOAN: untracked delivery may be another controller's, so none is booked. Set when this
+    /// driver finds another controller has run the pod (the EAP sequence resync at its next session);
+    /// cleared once the pod shows no bolus running. Without it a phone taking the pod back during the
+    /// watch's bolus booked the rest of that bolus as its own, beside the watch's record of the whole
+    /// bolus (simulator 2026-10-23: 3.6 U booked for a 2 U bolus). From next-dev OmnipodKit 3ea82ce.
+    var untrackedDeliveryIsForeign: Bool = false
+
 
     init(
         address: UInt32,
@@ -384,8 +391,11 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
         self.lastDeliveryStatusReceived = deliveryStatus
 
         // See if the pod's deliveryStatus indicates some insulin delivery that podState isn't tracking
+        if !deliveryStatus.bolusing {
+            untrackedDeliveryIsForeign = false   // PODLOAN: no other controller's bolus left running
+        }
         if deliveryStatus.bolusing && unfinalizedBolus == nil { // active bolus that we aren't tracking
-            if podProgressStatus.readyForDelivery {
+            if podProgressStatus.readyForDelivery && !untrackedDeliveryIsForeign {   // PODLOAN
                 // Create an unfinalizedBolus with the remaining bolus amount to capture what we can.
                 unfinalizedBolus = UnfinalizedDose(bolusAmount: bolusNotDelivered, startTime: date, scheduledCertainty: .certain, insulinType: insulinType, automatic: false)
             }
@@ -624,6 +634,7 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
         }
 
         self.primeFinishTime = rawValue["primeFinishTime"] as? Date
+        self.untrackedDeliveryIsForeign = rawValue["untrackedDeliveryIsForeign"] as? Bool ?? false   // PODLOAN
 
         if let rawInsulinType = rawValue["insulinType"] as? InsulinType.RawValue, let insulinType = InsulinType(rawValue: rawInsulinType) {
             self.insulinType = insulinType
@@ -729,6 +740,7 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
         rawValue["podTime"] = podTime
         rawValue["podTimeUpdated"] = podTimeUpdated
         rawValue["setupUnitsDelivered"] = setupUnitsDelivered
+        if untrackedDeliveryIsForeign { rawValue["untrackedDeliveryIsForeign"] = true }   // PODLOAN
 
         if configuredAlerts.count > 0 {
             let rawConfiguredAlerts = Dictionary(uniqueKeysWithValues:
