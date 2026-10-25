@@ -804,7 +804,6 @@ class BlePodComms: PodComms {
                 return
             }
 
-            // A failed handshake must not fall through to a session on the last session's keys.
             guard !(self.hasLTK && self.needsSessionEstablishment) else {
                 self.log.error("Session '%{public}@' refused: no session established on this connection", name)
                 block(.failure(PodCommsError.podNotConnected))
@@ -923,7 +922,6 @@ extension BlePodComms: PeripheralManagerDelegate {
                 bluetoothManager.endLoanReclaimEscalation()
                 delegate?.podCommsDidEstablishSession(self)
             } catch {
-                // Swallowed (upstream behaviour); bleRunSession refuses to run on the old keys.
                 omnipodLogDeviceEvent("[CONFIG] session handshake FAILED: \(error)")
                 log.error("Pod session sync error: %{public}@", String(describing: error))
             }

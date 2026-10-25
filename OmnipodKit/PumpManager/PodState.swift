@@ -694,16 +694,14 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
             }
 
             // BLE pod type specific values
-            // Decoded independently: an export drops the per-device handle, and must keep the key.
             if let ltkString = rawValue["ltk"] as? String {
                 self.ltk = Data(hexadecimalString: ltkString)
             }
             if let bleIdentifier = rawValue["bleIdentifier"] as? String {
                 self.bleIdentifier = bleIdentifier
             }
-            // A pod with no key connects and then fails every command, with nothing else saying why.
             if self.ltk == nil, rawValue["ltk"] != nil {
-                os_log("PodState decode: ltk present in rawValue but did not decode — every pod command will fail", log: log, type: .error)
+                log.error("PodState decode: ltk present in rawValue but did not decode — every pod command will fail")
             }
 
             if podType.isO5 {

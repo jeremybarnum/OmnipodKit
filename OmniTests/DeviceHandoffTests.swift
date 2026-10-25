@@ -161,7 +161,9 @@ final class DeviceHandoffTests: XCTestCase {
     func testAHandleThatNeverConnectedIsDroppedAtRelease() throws {
         var adopter = try adopt(export(makeState()), localState: watchLocalState)
         let podComms = PodComms(podState: adopter.podState, podType: dashType)
-        XCTAssertEqual(ConnectClock.adoptedHandleThatNeverConnected(), watchHandle)
+        let clock = ConnectClock()
+        clock.beginAttempt(adoptedHandle: adopter.podState?.bleIdentifier)   // as `init(adopting:)` does
+        XCTAssertEqual(clock.adoptedHandleThatNeverConnected(), watchHandle)
         podComms.forgetHandle()
         adopter.updatePodStateFromPodComms(podComms.podState)
         XCTAssertNil(adopter.localState, "the host saves nil, so the next adopt searches")
@@ -169,14 +171,27 @@ final class DeviceHandoffTests: XCTestCase {
     }
 
     func testAHandleThatConnectedIsKept() throws {
-        _ = try adopt(export(makeState()), localState: watchLocalState)
-        ConnectClock.noteConnect(appState: "fg")
-        XCTAssertNil(ConnectClock.adoptedHandleThatNeverConnected())
+        let adopted = try adopt(export(makeState()), localState: watchLocalState)
+        let clock = ConnectClock()
+        clock.beginAttempt(adoptedHandle: adopted.podState?.bleIdentifier)
+        clock.noteConnect(appState: "fg")
+        XCTAssertNil(clock.adoptedHandleThatNeverConnected())
     }
 
     func testAHandleFoundBySearchingIsNotDroppedAtRelease() throws {
-        _ = try adopt(export(makeState()))
-        XCTAssertNil(ConnectClock.adoptedHandleThatNeverConnected(), "only a handle the adopt attached is on trial")
+        let adopted = try adopt(export(makeState()))
+        let clock = ConnectClock()
+        clock.beginAttempt(adoptedHandle: adopted.podState?.bleIdentifier)
+        XCTAssertNil(clock.adoptedHandleThatNeverConnected(), "only a handle the adopt attached is on trial")
+    }
+
+    /// Each manager has its own clock: a re-adopt on the watch never reads the previous manager's attempt.
+    func testEachManagersConnectClockIsItsOwn() {
+        let first = ConnectClock(), second = ConnectClock()
+        first.beginAttempt(adoptedHandle: watchHandle)
+        second.beginAttempt(adoptedHandle: nil)
+        second.noteConnect(appState: "fg")
+        XCTAssertEqual(first.adoptedHandleThatNeverConnected(), watchHandle, "the second manager's connect is not the first's")
     }
 
     func testAnAdopterBooksNoUntrackedBolusAsItsOwn() throws {
