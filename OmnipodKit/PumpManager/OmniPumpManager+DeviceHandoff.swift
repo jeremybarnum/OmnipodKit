@@ -86,6 +86,10 @@ extension OmniPumpManagerState {
         return state
     }
 
+    /// Not while a command to the pod is unconfirmed, sent or still being sent: the export leaves it
+    /// out, and only this controller could settle it.
+    var mayReleaseControl: Bool { podState?.unacknowledgedCommand == nil }
+
     /// Copies of a bolus or temp basal still in flight now belong to the controller taking over.
     mutating func releaseControl() {
         podConnectionReleased = true
@@ -142,7 +146,14 @@ extension OmniPumpManager: ExclusiveDeviceControl {
 
     /// Stops bidding for the pod's one BLE connection; pod state, pairing and keys are kept.
     /// Copies of a bolus or temp basal still in flight now belong to the controller taking over.
+    /// Refused while a command to the pod is unconfirmed: the export leaves it out, so the controller
+    /// taking over would book nothing from it. The host reads `isControlReleased` to see the refusal.
     public func releaseControl() {
+        guard state.mayReleaseControl else {
+            let sending = state.podState?.unacknowledgedCommand?.isInFlight == true
+            omnipodLogDeviceEvent("[release] refused — the pod has not confirmed the last command (\(sending ? "still being sent" : "answer lost")); control kept")
+            return
+        }
         setState { $0.releaseControl() }
         (podComms as? BlePodComms)?.releaseConnection()
 

@@ -194,6 +194,17 @@ final class DeviceHandoffTests: XCTestCase {
         XCTAssertEqual(first.adoptedHandleThatNeverConnected(), watchHandle, "the second manager's connect is not the first's")
     }
 
+    /// A command the pod has not confirmed, sent or still being sent, keeps the pod with this controller.
+    func testControlIsNotReleasedWhileACommandIsUnconfirmed() {
+        var pod = makePodState()
+        pod.unacknowledgedCommand = .stopProgram(.tempBasal, 3, Date(), false)
+        XCTAssertFalse(makeState(pod: pod).mayReleaseControl, "an answer that never arrived")
+        pod.unacknowledgedCommand = .stopProgram(.tempBasal, 3, Date(), true)
+        XCTAssertFalse(makeState(pod: pod).mayReleaseControl, "a command still being sent")
+        pod.unacknowledgedCommand = nil
+        XCTAssertTrue(makeState(pod: pod).mayReleaseControl)
+    }
+
     func testAnAdopterBooksNoUntrackedBolusAsItsOwn() throws {
         var pod = makePodState()
         pod.unfinalizedBolus = nil
