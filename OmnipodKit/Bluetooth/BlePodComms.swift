@@ -62,10 +62,6 @@ class BlePodComms: PodComms {
         bluetoothManager.beginLoanTakeover(podId: podId)
     }
 
-    /// The most recent EAP SQN resync: the pod's session counter found ahead of ours, so another
-    /// controller established sessions since our last contact. nil until the first this process.
-    private(set) var lastSqnResync: (at: Date, ours: Int, pods: Int)?
-
     /// After `delay`, scan for the pod by address if `stillWaiting` still returns the link's
     /// diagnostics (nil: the pod answered or control was released). A later take replaces it.
     func scheduleTakeEscalation(podId: UInt32, after delay: TimeInterval, stillWaiting: @escaping () -> String?) {
@@ -380,17 +376,13 @@ class BlePodComms: PodComms {
             if podState != nil {
                 let podSqn = keys.synchronizedEapSqn.toInt()
                 log.bleDebug("@@@ Updating EAP SQN to: %d", podSqn)
-                // The delta counts sessions another controller made since our last contact.
-                let delta = podSqn - eapSeq
-                lastSqnResync = (at: Date(), ours: eapSeq, pods: podSqn)
-                omnipodLogDeviceEvent(String(format:
-                    "[trust] EAP SQN RESYNC — pod=%d ours=%d (Δ%+d): another controller has talked to this pod since our last contact [sqn-resync]",
-                    podSqn, eapSeq, delta))
                 podState!.bleMessageTransportState.eapSeq = podSqn
-                // Read before writing, and book none of what we do not track: any resync counts,
-                // since the delta reads 0 after a single foreign session.
-                podState!.lastDeliveryStatusReceived = nil
-                podState!.untrackedDeliveryIsForeign = true
+                // Any resync counts: after a single foreign session the pod's counter equals the one just sent.
+                let pending = podState!.unacknowledgedCommand
+                if podState!.resolveAfterSessionResync() {
+                    let dropped = pending.map { " · unconfirmed \($0) dropped, nothing booked" } ?? ""
+                    omnipodLogDeviceEvent("[trust] EAP SQN RESYNC — pod=\(podSqn) ours=\(eapSeq): another controller may have run this shared pod [sqn-resync]\(dropped)")
+                }
             }
             return nil
         case .SessionKeys(let keys):

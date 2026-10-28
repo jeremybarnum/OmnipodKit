@@ -284,6 +284,7 @@ final class DeviceHandoffTests: XCTestCase {
         state.configuredByAnotherController = true
         var pod = try XCTUnwrap(state.podState)
         pod.untrackedDeliveryIsForeign = true
+        pod.sharedWithAnotherController = true
         state.updatePodStateFromPodComms(pod)
 
         let relaunched = try XCTUnwrap(OmniPumpManagerState(rawValue: state.rawValue))
@@ -291,6 +292,50 @@ final class DeviceHandoffTests: XCTestCase {
         XCTAssertTrue(relaunched.inFlightDosesInheritedAway)
         XCTAssertTrue(relaunched.configuredByAnotherController)
         XCTAssertEqual(relaunched.podState?.untrackedDeliveryIsForeign, true)
+        XCTAssertEqual(relaunched.podState?.sharedWithAnotherController, true)
+    }
+
+    // MARK: - Session resync
+
+    func testExportingOrAdoptingMarksThePodShared() throws {
+        let comms = PodComms(podState: makePodState(), podType: dashType)
+        XCTAssertEqual(comms.podState?.sharedWithAnotherController, false)
+        comms.markSharedWithAnotherController()
+        XCTAssertEqual(comms.podState?.sharedWithAnotherController, true, "this controller handed out a copy")
+
+        let adopted = try adopt(export(makeState()))
+        XCTAssertEqual(adopted.podState?.sharedWithAnotherController, true, "this one started from a copy")
+    }
+
+    /// This controller's command was unconfirmed when another started from its copy. The pod's status
+    /// now answers for the other controller's commands, so the command is dropped with nothing booked.
+    func testOnASharedPodAResyncDropsTheUnconfirmedCommandAndBooksNothing() {
+        var pod = makePodState()
+        pod.unfinalizedBolus = nil
+        pod.sharedWithAnotherController = true
+        pod.unacknowledgedCommand = .program(.bolus(volume: 1.0, automatic: true), 5, Date(), false)
+        pod.lastDeliveryStatusReceived = .scheduledBasal
+
+        XCTAssertTrue(pod.resolveAfterSessionResync())
+
+        XCTAssertNil(pod.unacknowledgedCommand, "nobody can settle it now")
+        XCTAssertTrue(makeState(pod: pod).mayReleaseControl, "so it no longer keeps the pod")
+        XCTAssertNil(pod.lastDeliveryStatusReceived, "read before writing")
+        // The status a matching message number would once have taken as this controller's bolus.
+        pod.updateFromStatusResponse(status(.bolusInProgress, bolusNotDelivered: 0.8))
+        XCTAssertNil(pod.unfinalizedBolus, "the other controller's bolus is not booked here")
+    }
+
+    /// Normal looping: only this controller's own counter, saved late, can be behind, so the pod's
+    /// status still settles the command, as before.
+    func testOnAPodNeverSharedAResyncChangesNothing() {
+        var pod = makePodState()
+        pod.lastDeliveryStatusReceived = .scheduledBasal
+        let before = pod
+
+        XCTAssertFalse(pod.resolveAfterSessionResync())
+        XCTAssertEqual(pod, before)
+        XCTAssertNotNil(pod.unacknowledgedCommand)
     }
 
     // MARK: - Untracked delivery (stock behaviour unchanged)

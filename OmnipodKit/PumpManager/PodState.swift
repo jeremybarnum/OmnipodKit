@@ -140,8 +140,13 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
     var reportedBolusEndsAt: Date?
 
     /// Untracked delivery may be another controller's, so none is booked. Set on adopt, take-back or
-    /// a foreign session; cleared once the pod shows no bolus running.
+    /// a session resync on a shared pod; cleared once the pod shows no bolus running.
     var untrackedDeliveryIsForeign: Bool = false
+
+    /// This controller handed out the pod's state or adopted it, so another controller may run the
+    /// pod. Only then does a session resync mean another controller ran it; a pod never shared
+    /// resyncs as before. Kept for the pod's life.
+    var sharedWithAnotherController: Bool = false
 
 
     init(
@@ -658,6 +663,7 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
         }
 
         self.untrackedDeliveryIsForeign = rawValue["untrackedDeliveryIsForeign"] as? Bool ?? false
+        self.sharedWithAnotherController = rawValue["sharedWithAnotherController"] as? Bool ?? false
 
         if let podTypeRaw = rawValue["podType"] as? UInt8 {
             self.podType = PodType(rawValue: podTypeRaw)
@@ -762,6 +768,9 @@ public struct PodState: RawRepresentable, Equatable, CustomDebugStringConvertibl
         rawValue["setupUnitsDelivered"] = setupUnitsDelivered
         if untrackedDeliveryIsForeign {
             rawValue["untrackedDeliveryIsForeign"] = true
+        }
+        if sharedWithAnotherController {
+            rawValue["sharedWithAnotherController"] = true
         }
 
         if configuredAlerts.count > 0 {

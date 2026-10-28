@@ -21,8 +21,12 @@ import os.log
 
 extension OmniPumpManager: DeviceConfigurationSharing {
 
+    /// Marks the pod shared: another controller may run it from this copy.
     public func exportConfiguration() -> SharedDeviceConfiguration {
-        state.sharedConfiguration(managerIdentifier: pluginIdentifier)
+        if state.podState?.sharedWithAnotherController == false {
+            podComms.markSharedWithAnotherController()
+        }
+        return state.sharedConfiguration(managerIdentifier: pluginIdentifier)
     }
 
     /// The state `init(adopting:localState:)` builds from, with this controller's own handle if
@@ -78,6 +82,7 @@ extension OmniPumpManagerState {
         var pod = podState?.sharedFacts
         pod?.bleIdentifier = handle
         pod?.untrackedDeliveryIsForeign = true
+        pod?.sharedWithAnotherController = true
         state.updatePodStateFromPodComms(pod)
         state.podConnectionReleased = false
         state.configuredByAnotherController = true
@@ -114,15 +119,28 @@ extension PodState {
     }
 
     /// Another controller ran the pod: forget the last delivery status, book no untracked delivery,
-    /// and with `dropInFlight` drop the in-flight copies so the pod's status resolves them.
+    /// and with `dropInFlight` drop the in-flight copies so the pod's status resolves them. A command
+    /// still unconfirmed is dropped with nothing booked: the pod's status now answers for the other
+    /// controller's commands, and the host's check of the pod's delivered total books any excess.
     mutating func resolveAfterForeignControl(dropInFlight: Bool) {
         lastDeliveryStatusReceived = nil
         reportedBolusEndsAt = nil
         untrackedDeliveryIsForeign = true
+        unacknowledgedCommand = nil
         if dropInFlight {
             unfinalizedBolus = nil
             unfinalizedTempBasal = nil
         }
+    }
+
+    /// The pod's session counter was found ahead of this controller's. On a shared pod, another
+    /// controller may have run it: resolve as after foreign control, keeping in-flight copies. A pod
+    /// never shared resyncs as before: only this controller's own counter, saved late, can be
+    /// behind. Returns whether another controller may have run the pod.
+    mutating func resolveAfterSessionResync() -> Bool {
+        guard sharedWithAnotherController else { return false }
+        resolveAfterForeignControl(dropInFlight: false)
+        return true
     }
 }
 
@@ -132,6 +150,14 @@ extension PodComms {
     func forgetHandle() {
         podStateLock.lock()
         podState?.bleIdentifier = nil
+        podStateLock.unlock()
+    }
+
+    /// See PodState.sharedWithAnotherController. Once per pod; waits out a session in progress,
+    /// like an insulin type change.
+    func markSharedWithAnotherController() {
+        podStateLock.lock()
+        podState?.sharedWithAnotherController = true
         podStateLock.unlock()
     }
 }
