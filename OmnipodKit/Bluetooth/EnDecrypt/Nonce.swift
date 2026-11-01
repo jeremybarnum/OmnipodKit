@@ -18,7 +18,8 @@ class Nonce {
     }
 
     func toData(sqn: Int, podReceiving: Bool) -> Data {
-        var ret = Data(bigEndian: sqn)
+        // Int64, not Int: Int is 4 bytes on 32-bit watches, and the range below needs 8.
+        var ret = Data(bigEndian: Int64(sqn))
             .subdata(in: 3..<8)
         if (podReceiving) {
             ret[0] = UInt8(ret[0] & 127)

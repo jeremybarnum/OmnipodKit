@@ -23,13 +23,12 @@ class EapSqn {
     }
     
     init(int: Int) {
-        self.data = withUnsafeBytes(of: int.bigEndian) { Data($0) }
+        self.data = withUnsafeBytes(of: Int64(int).bigEndian) { Data($0) }
     }
     
     func toInt() -> Int {
-        return (Data([0x00, 0x00]) + data).withUnsafeBytes {
-            $0.load(as: Int.self).bigEndian
-        }
+        // Byte by byte: loading an Int reads only 4 of the 8 bytes on 32-bit watches.
+        return Int(data.reduce(Int64(0)) { $0 << 8 | Int64($1) })
     }
     
     func increment() -> EapSqn {
