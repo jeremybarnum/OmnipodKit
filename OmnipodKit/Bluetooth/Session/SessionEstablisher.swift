@@ -59,7 +59,6 @@ class SessionEstablisher {
 
         self.manager = manager
         self.ltk = ltk
-        // Int64, not Int: Int is 4 bytes on 32-bit watches, and the range below needs 8.
         self.eapSqn = Data(bigEndian: Int64(eapSqn)).subdata(in: 2..<8)
         self.myId = myId
         self.podId = podId

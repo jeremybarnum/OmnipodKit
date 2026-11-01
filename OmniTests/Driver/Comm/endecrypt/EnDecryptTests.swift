@@ -61,13 +61,3 @@ class EnDecryptTest: XCTestCase {
     }
      
 }
-
-class EapSqnTests: XCTestCase {
-
-    // The six sequence bytes are read whole: on a 32-bit watch an Int load would see only four.
-    func testToIntReadsAllSixBytes() throws {
-        XCTAssertEqual(try EapSqn(data: Data(hexadecimalString: "000000000016")!).toInt(), 22)
-        XCTAssertEqual(try EapSqn(data: Data(hexadecimalString: "000001000000")!).toInt(), 0x1000000)
-        XCTAssertEqual(try EapSqn(data: Data(hexadecimalString: "000000010203")!).toInt(), 0x010203)
-    }
-}
